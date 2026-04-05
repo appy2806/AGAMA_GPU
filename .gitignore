@@ -1,0 +1,19 @@
+# User requested
+*.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+.ipynb_checkpoints/
+.pytest_cache/
+
+# CUDA/C++ artifacts
+*.o
+*.so
+*.out
+
+# System/IDE
+.DS_Store
+.vscode/
+.swp
