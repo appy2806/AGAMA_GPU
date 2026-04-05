@@ -582,19 +582,9 @@ class DehnenSphericalPotentialGPU(_AnalyticBase):
 
     def _phi(self, x, y, z):
         return _dehnen_phi_kernel(x, y, z, self._GM, self._a, self._gamma, self._exp)
-        # r  = cp.sqrt(x*x + y*y + z*z)
-        # a  = self._a; GM = self._GM; exp = self._exp
-        # safe_r = cp.where(r > 1e-300, r, 1e-300)
-        # u = safe_r / (safe_r + a)               # r/(r+a) in (0,1)
-        # return -(GM/a) * (1.0 - u**exp) / exp
 
     def _rho(self, x, y, z):
         return _dehnen_rho_kernel(x, y, z, self._M, self._a, self._gamma)
-        # r  = cp.sqrt(x*x + y*y + z*z)
-        # a  = self._a; g = self._gamma; M = self._GM / _G
-        # safe_r = cp.where(r > 1e-300, r, 1e-300)
-        # # rho = (3-g)*M / (4*pi*a³) * (r/a)^(-g) * (1 + r/a)^(g-4)
-        # return ((3.0-g)*M/(4.0*math.pi*a**3)) * (safe_r/a)**(-g) * (1.0+safe_r/a)**(g-4.0)
     
     def _grad(self, x, y, z):
         out = cp.empty((x.size, 3), dtype=x.dtype)
@@ -1066,121 +1056,6 @@ class DiskAnsatzPotentialGPU(_AnalyticBase):
         # Again, use the consistent trace of the Hessian trace logic 
         # but baked into a single Rho kernel for performance
         return _disk_ansatz_exp_rho_kernel(x, y, z, self._Sigma, self._hr, self._hz, _INV_4PIG)
-
-# class DiskAnsatzPotentialGPU(_AnalyticBase):
-#     """
-#     DiskAnsatz separable disk potential: Phi(R,z) = f(r) * H(z)
-#     where r = sqrt(R^2+z^2) is the 3D spherical radius.
-
-#     f(r)  = 4*pi * surfaceDensity * exp(-r/scaleRadius)   [sersicIndex=1, no inner cutoff]
-#     H(z)  = exponential (scaleHeight > 0), isothermal sech² (scaleHeight < 0), or thin (=0)
-
-#     Constructor:
-#         DiskAnsatzPotentialGPU(surfaceDensity=1, scaleRadius=1, scaleHeight=0.1)
-#     """
-
-#     def __init__(self, surfaceDensity: float = 1.0,
-#                  scaleRadius: float = 1.0,
-#                  scaleHeight: float = 0.1):
-#         self._Sigma = float(surfaceDensity)
-#         self._hr    = float(scaleRadius)
-#         self._hz    = float(scaleHeight)
-
-#     @classmethod
-#     def from_agama(cls, pot) -> "DiskAnsatzPotentialGPU":
-#         p = _agama_params(pot)
-#         return cls(surfaceDensity=p.get('surfacedensity', 1.0),
-#                    scaleRadius=p.get('scaleradius', 1.0),
-#                    scaleHeight=p.get('scaleheight', 0.1))
-
-#     def _f(self, r):
-#         """f(r) = 4π*Σ*exp(-r/hr), f'(r), f''(r)."""
-#         fval   = 4.0*math.pi*self._Sigma * cp.exp(-r/self._hr)
-#         fder1  = -fval / self._hr
-#         fder2  =  fval / self._hr**2
-#         return fval, fder1, fder2
-
-#     def _H(self, z):
-#         """H(z), H'(z), H''(z) — three scaleHeight sign conventions."""
-#         hz = self._hz
-#         abz = cp.abs(z)
-#         sgn = cp.sign(z)
-
-#         if abs(hz) < 1e-300:
-#             # Thin disk
-#             Hval  = 0.5 * abz
-#             Hder1 = 0.5 * sgn
-#             Hder2 = cp.zeros_like(z)
-#         elif hz > 0:
-#             # Exponential disk: H(z) = (hz/2)*(exp(-|z|/hz) - 1 + |z|/hz)
-#             u     = abz / hz
-#             eu    = cp.exp(-u)
-#             Hval  = (hz/2.0) * (eu - 1.0 + u)
-#             Hder1 = (1.0/2.0) * sgn * (1.0 - eu)
-#             Hder2 = (1.0/2.0) * eu / hz
-#         else:
-#             # Isothermal sech^2 disk (hz < 0, use |hz|):
-#             # H(z)   = |h|*(|z|/(2|h|) + ln(cosh(|z|/(2|h|))))
-#             # H'(z)  = (1/2)*sign(z)*(1 + tanh(|z|/(2|h|)))   [note: not just tanh!]
-#             # H''(z) = sech^2(|z|/(2|h|)) / (4|h|)
-#             ahz   = abs(hz)
-#             u     = abz / (2.0*ahz)
-#             cu    = cp.cosh(u); tu = cp.tanh(u)
-#             Hval  = ahz * (u + cp.log(cu))
-#             Hder1 = 0.5 * sgn * (1.0 + tu)   # was: 0.5*sgn*tu — missing +1
-#             Hder2 = 1.0/(4.0*ahz) / cu**2
-
-#         return Hval, Hder1, Hder2
-
-#     def _phi(self, x, y, z):
-#         r = cp.sqrt(x*x + y*y + z*z)
-#         safe_r = cp.where(r > 1e-300, r, 1e-300)
-#         fval, _, _ = self._f(safe_r)
-#         Hval, _, _ = self._H(z)
-#         return fval * Hval
-
-#     def _grad(self, x, y, z):
-#         r = cp.sqrt(x*x + y*y + z*z)
-#         safe_r = cp.where(r > 1e-300, r, 1e-300)
-#         inv_r  = 1.0 / safe_r
-
-#         fval, fder1, _ = self._f(safe_r)
-#         Hval, Hder1, _ = self._H(z)
-
-#         # dPhi/dx = H * f'(r) * (x/r)
-#         dPhi_dx = Hval * fder1 * (x * inv_r)
-#         dPhi_dy = Hval * fder1 * (y * inv_r)
-#         # dPhi/dz = H * f'(r) * (z/r) + H'(z) * f(r)
-#         dPhi_dz = Hval * fder1 * (z * inv_r) + Hder1 * fval
-#         return dPhi_dx, dPhi_dy, dPhi_dz
-
-#     def _hess(self, x, y, z):
-#         r  = cp.sqrt(x*x + y*y + z*z)
-#         safe_r = cp.where(r > 1e-300, r, 1e-300)
-#         inv_r  = 1.0 / safe_r
-#         R2 = x*x + y*y
-
-#         fval, fder1, fder2 = self._f(safe_r)
-#         Hval, Hder1, Hder2 = self._H(z)
-
-#         # From CLAUD.md Q2:
-#         zr = z * inv_r; xr = x * inv_r; yr = y * inv_r
-#         Hxx = Hval*(fder2*xr**2 + fder1*(1.0-xr**2)*inv_r)
-#         Hyy = Hval*(fder2*yr**2 + fder1*(1.0-yr**2)*inv_r)
-#         Hzz = (Hval*(fder2*zr**2 + fder1*(1.0-zr**2)*inv_r)
-#                + 2.0*fder1*Hder1*zr + fval*Hder2)
-#         Hxy = Hval*xr*yr*(fder2 - fder1*inv_r)
-#         Hxz = Hval*xr*zr*(fder2 - fder1*inv_r) + fder1*Hder1*xr
-#         Hyz = Hval*yr*zr*(fder2 - fder1*inv_r) + fder1*Hder1*yr
-#         return cp.stack([Hxx, Hyy, Hzz, Hxy, Hyz, Hxz], axis=1)
-
-#     def _rho(self, x, y, z):
-#         # rho = nabla²Phi / (4piG)
-#         # Laplacian of Phi = Hxx + Hyy + Hzz
-#         h = self._hess(x, y, z)
-#         lap = h[:, 0] + h[:, 1] + h[:, 2]
-#         return lap * _INV_4PIG
-
 
 # ---------------------------------------------------------------------------
 # UniformAcceleration
