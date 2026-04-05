@@ -27,7 +27,7 @@ from gpu_potential import MultipolePotentialGPU        # optimized (parent dir)
 # Baseline: load without clobbering the parent import
 import importlib.util
 _spec = importlib.util.spec_from_file_location(
-    "_baseline_gpu", "./_baseline/gpu_potential.py")
+    "_baseline_gpu", "../_baseline/gpu_potential.py")
 _baseline_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_baseline_mod)
 MultipolePotentialGPU_Baseline = _baseline_mod.MultipolePotentialGPU
