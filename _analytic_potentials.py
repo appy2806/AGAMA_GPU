@@ -11,7 +11,7 @@ Each class matches the Agama Python constructor API as closely as possible:
     MiyamotoNagaiPotentialGPU(mass, scaleRadius, scaleHeight)
     LogHaloPotentialGPU(velocity, coreRadius, axisRatioY=1, axisRatioZ=1)
     DehnenSphericalPotentialGPU(mass, scaleRadius, gamma=1)
-    DiskAnsatzPotentialGPU(surfaceDensity, scaleRadius, scaleHeight)
+    DiskAnsatzPotentialGPU(surfaceDensity, scaleRadius, scaleHeight, innerCutoffRadius=0)
     UniformAccelerationGPU(ax=0, ay=0, az=0)
 
 All classes expose:
@@ -934,98 +934,147 @@ class LogHaloPotentialGPU(_AnalyticBase):
 # DiskAnsatz  (formulas from CLAUD.md Q2)
 # ---------------------------------------------------------------------------
 
-_disk_ansatz_exp_phi_kernel = cp.ElementwiseKernel(
-    'T x, T y, T z, T Sigma, T hr, T hz', 'T out',
+# ---------------------------------------------------------------------------
+# DiskAnsatz kernels — accept innerCutoffRadius (hin >= 0).
+#
+# Radial function with inner exponential cutoff:
+#   f(r) = 4*pi*Sigma * exp(-r/hr - hin/r)
+#   f'/f = -1/hr + hin/r^2          (fdo_f)
+#   f'   = f * fdo_f
+#   f''  = f * (fdo_f^2 - 2*hin/r^3)
+#
+# When hin=0 these reduce exactly to the original exponential-only formulas.
+# H(z) vertical function (exponential scaleHeight > 0 here; sech2/thin not yet split).
+# ---------------------------------------------------------------------------
+
+_disk_ansatz_phi_kernel = cp.ElementwiseKernel(
+    'T x, T y, T z, T Sigma, T hr, T hz, T hin', 'T out',
     '''
-    T r = sqrt(x*x + y*y + z*z);
+    T r     = sqrt(x*x + y*y + z*z);
     T safe_r = (r < (T)1e-300) ? (T)1e-300 : r;
-    T fval = 12.566370614359172 * Sigma * exp(-safe_r / hr);
-    
+    T fval  = 12.566370614359172 * Sigma * exp(-safe_r / hr - hin / safe_r);
+
     T abz = abs(z);
-    T u = abz / hz;
+    T u   = abz / hz;
     T Hval = (hz / 2.0) * (exp(-u) - 1.0 + u);
-    
+
     out = fval * Hval;
-    ''', 'disk_ansatz_exp_phi'
+    ''', 'disk_ansatz_phi'
 )
 
-_disk_ansatz_exp_grad_kernel = cp.ElementwiseKernel(
-    'T x, T y, T z, T Sigma, T hr, T hz', 'raw T out',
+_disk_ansatz_grad_kernel = cp.ElementwiseKernel(
+    'T x, T y, T z, T Sigma, T hr, T hz, T hin', 'raw T out',
     '''
-    T r = sqrt(x*x + y*y + z*z);
+    T r      = sqrt(x*x + y*y + z*z);
     T safe_r = (r < (T)1e-300) ? (T)1e-300 : r;
-    T inv_r = 1.0 / safe_r;
-    
-    T fval = 12.566370614359172 * Sigma * exp(-safe_r / hr);
-    T fder1 = -fval / hr;
-    
-    T abz = abs(z);
-    T u = abz / hz;
-    T eu = exp(-u);
-    T Hval = (hz / 2.0) * (eu - 1.0 + u);
+    T inv_r  = 1.0 / safe_r;
+
+    T fval  = 12.566370614359172 * Sigma * exp(-safe_r / hr - hin / safe_r);
+    T fdo_f = -1.0 / hr + hin * inv_r * inv_r;
+    T fder1 = fval * fdo_f;
+
+    T abz  = abs(z);
+    T u    = abz / hz;
+    T eu   = exp(-u);
+    T Hval  = (hz / 2.0) * (eu - 1.0 + u);
     T Hder1 = 0.5 * ((z > 0) - (z < 0)) * (1.0 - eu);
-    
+
     T common = Hval * fder1 * inv_r;
     out[i*3 + 0] = common * x;
     out[i*3 + 1] = common * y;
     out[i*3 + 2] = common * z + Hder1 * fval;
-    ''', 'disk_ansatz_exp_grad'
+    ''', 'disk_ansatz_grad'
 )
 
-_disk_ansatz_exp_hess_kernel = cp.ElementwiseKernel(
-    'T x, T y, T z, T Sigma, T hr, T hz', 'raw T out',
+_disk_ansatz_hess_kernel = cp.ElementwiseKernel(
+    'T x, T y, T z, T Sigma, T hr, T hz, T hin', 'raw T out',
     '''
-    T r2 = x*x + y*y + z*z;
-    T r = sqrt(r2);
+    T r2     = x*x + y*y + z*z;
+    T r      = sqrt(r2);
     T safe_r = (r < (T)1e-300) ? (T)1e-300 : r;
-    T inv_r = 1.0 / safe_r;
-    
-    T fval = 12.566370614359172 * Sigma * exp(-safe_r / hr);
-    T fder1 = -fval / hr;
-    T fder2 = fval / (hr * hr);
-    
-    T abz = abs(z);
-    T u = abz / hz;
-    T eu = exp(-u);
-    T Hval = (hz / 2.0) * (eu - 1.0 + u);
+    T inv_r  = 1.0 / safe_r;
+
+    T fval  = 12.566370614359172 * Sigma * exp(-safe_r / hr - hin / safe_r);
+    T fdo_f = -1.0 / hr + hin * inv_r * inv_r;
+    T fder1 = fval * fdo_f;
+    T fder2 = fval * (fdo_f * fdo_f - 2.0 * hin * inv_r * inv_r * inv_r);
+
+    T abz   = abs(z);
+    T u     = abz / hz;
+    T eu    = exp(-u);
+    T Hval  = (hz / 2.0) * (eu - 1.0 + u);
     T Hder1 = 0.5 * ((z > 0) - (z < 0)) * (1.0 - eu);
     T Hder2 = 0.5 * eu / hz;
-    
+
     T xr = x * inv_r; T yr = y * inv_r; T zr = z * inv_r;
-    T A = Hval * (fder2 - fder1 * inv_r);
-    T B = Hval * fder1 * inv_r;
-    
-    out[i*6 + 0] = A * xr * xr + B; // Hxx
-    out[i*6 + 1] = A * yr * yr + B; // Hyy
-    out[i*6 + 2] = (Hval * (fder2 * zr * zr + fder1 * (1.0 - zr * zr) * inv_r) 
-                    + 2.0 * fder1 * Hder1 * zr + fval * Hder2); // Hzz
-    out[i*6 + 3] = A * xr * yr; // Hxy
-    out[i*6 + 4] = A * yr * zr + fder1 * Hder1 * yr; // Hyz
-    out[i*6 + 5] = A * xr * zr + fder1 * Hder1 * xr; // Hxz
-    ''', 'disk_ansatz_exp_hess'
+    T A  = Hval * (fder2 - fder1 * inv_r);
+    T B  = Hval * fder1 * inv_r;
+
+    out[i*6 + 0] = A * xr * xr + B;                                              // Hxx
+    out[i*6 + 1] = A * yr * yr + B;                                              // Hyy
+    out[i*6 + 2] = (Hval * (fder2 * zr * zr + fder1 * (1.0 - zr * zr) * inv_r)
+                    + 2.0 * fder1 * Hder1 * zr + fval * Hder2);                 // Hzz
+    out[i*6 + 3] = A * xr * yr;                                                  // Hxy
+    out[i*6 + 4] = A * yr * zr + fder1 * Hder1 * yr;                            // Hyz
+    out[i*6 + 5] = A * xr * zr + fder1 * Hder1 * xr;                            // Hxz
+    ''', 'disk_ansatz_hess'
 )
+
+# Density = Laplacian(Phi) / (4*pi*G).
+# Laplacian = Hxx + Hyy + Hzz
+#           = Hval*(f'' + 2*f'*inv_r) + 2*f'*H'*z/r + f*H''
+_disk_ansatz_rho_kernel = cp.ElementwiseKernel(
+    'T x, T y, T z, T Sigma, T hr, T hz, T hin, T INV_4PIG', 'T out',
+    '''
+    T r2     = x*x + y*y + z*z;
+    T r      = sqrt(r2);
+    T safe_r = (r < (T)1e-300) ? (T)1e-300 : r;
+    T inv_r  = 1.0 / safe_r;
+
+    T fval  = 12.566370614359172 * Sigma * exp(-safe_r / hr - hin / safe_r);
+    T fdo_f = -1.0 / hr + hin * inv_r * inv_r;
+    T fder1 = fval * fdo_f;
+    T fder2 = fval * (fdo_f * fdo_f - 2.0 * hin * inv_r * inv_r * inv_r);
+
+    T abz   = abs(z);
+    T u     = abz / hz;
+    T eu    = exp(-u);
+    T Hval  = (hz / 2.0) * (eu - 1.0 + u);
+    T Hder1 = 0.5 * ((z > 0) - (z < 0)) * (1.0 - eu);
+    T Hder2 = 0.5 * eu / hz;
+
+    T zr  = z * inv_r;
+    T lap = Hval * (fder2 + 2.0 * fder1 * inv_r)
+            + 2.0 * fder1 * Hder1 * zr
+            + fval * Hder2;
+    out = lap * INV_4PIG;
+    ''', 'disk_ansatz_rho'
+)
+
 
 class DiskAnsatzPotentialGPU(_AnalyticBase):
     """
     DiskAnsatz separable disk potential: Phi(R,z) = f(r) * H(z)
     where r = sqrt(R^2+z^2) is the 3D spherical radius.
 
-    f(r)  = 4*pi * surfaceDensity * exp(-r/scaleRadius)   [sersicIndex=1, no inner cutoff]
-    H(z)  = exponential (scaleHeight > 0), isothermal sech² (scaleHeight < 0), or thin (=0)
+    f(r) = 4*pi * surfaceDensity * exp(-r/scaleRadius - innerCutoffRadius/r)
+    H(z) = exponential (scaleHeight > 0), isothermal sech^2 (scaleHeight < 0), or thin (=0)
 
     Constructor:
-        DiskAnsatzPotentialGPU(surfaceDensity=1, scaleRadius=1, scaleHeight=0.1)
+        DiskAnsatzPotentialGPU(surfaceDensity=1, scaleRadius=1, scaleHeight=0.1,
+                               innerCutoffRadius=0)
     """
-    
-    def __init__(self, surfaceDensity=1.0, scaleRadius=1.0, scaleHeight=0.1):
-        self._Sigma = float(surfaceDensity)
-        self._hr = float(scaleRadius)
-        self._hz = float(scaleHeight)
-        
-        # Select the right kernel suite based on hz sign
-        if abs(self._hz) < 1e-10:
+
+    def __init__(self, surfaceDensity=1.0, scaleRadius=1.0, scaleHeight=0.1,
+                 innerCutoffRadius=0.0):
+        self._Sigma = float(surfaceDensity) * _G  # absorb G so kernel output is in (km/s)^2
+        self._hr    = float(scaleRadius)
+        self._hz    = float(abs(scaleHeight))   # kernels use |hz|; sign handled below
+        self._hin   = float(innerCutoffRadius)
+
+        if self._hz < 1e-10:
             self._mode = "thin"
-        elif self._hz > 0:
+        elif scaleHeight > 0:
             self._mode = "exp"
         else:
             self._mode = "sech2"
@@ -1035,27 +1084,26 @@ class DiskAnsatzPotentialGPU(_AnalyticBase):
         raise TypeError(
             "DiskAnsatzPotentialGPU.from_agama() is not supported: Agama does not export "
             "analytic potential parameters.\n"
-            "Construct directly:  DiskAnsatzPotentialGPU(surfaceDensity=..., scaleRadius=..., scaleHeight=...)"
+            "Construct directly:  DiskAnsatzPotentialGPU(surfaceDensity=..., scaleRadius=..., "
+            "scaleHeight=..., innerCutoffRadius=...)"
         )
 
     def _phi(self, x, y, z):
-        # Implementation for exp mode:
-        return _disk_ansatz_exp_phi_kernel(x, y, z, self._Sigma, self._hr, self._hz)
+        return _disk_ansatz_phi_kernel(x, y, z, self._Sigma, self._hr, self._hz, self._hin)
 
     def _grad(self, x, y, z):
         out = cp.empty((x.size, 3), dtype=x.dtype)
-        _disk_ansatz_exp_grad_kernel(x, y, z, self._Sigma, self._hr, self._hz, out)
+        _disk_ansatz_grad_kernel(x, y, z, self._Sigma, self._hr, self._hz, self._hin, out)
         return out
 
     def _hess(self, x, y, z):
         out = cp.empty((x.size, 6), dtype=x.dtype)
-        _disk_ansatz_exp_hess_kernel(x, y, z, self._Sigma, self._hr, self._hz, out)
+        _disk_ansatz_hess_kernel(x, y, z, self._Sigma, self._hr, self._hz, self._hin, out)
         return out
-        
+
     def _rho(self, x, y, z):
-        # Again, use the consistent trace of the Hessian trace logic 
-        # but baked into a single Rho kernel for performance
-        return _disk_ansatz_exp_rho_kernel(x, y, z, self._Sigma, self._hr, self._hz, _INV_4PIG)
+        return _disk_ansatz_rho_kernel(
+            x, y, z, self._Sigma, self._hr, self._hz, self._hin, _INV_4PIG)
 
 # ---------------------------------------------------------------------------
 # UniformAcceleration

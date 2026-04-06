@@ -33,119 +33,54 @@
 //    → force derivatives = -hess = [dFx/dx, dFy/dy, dFz/dz, dFx/dy, dFy/dz, dFz/dx]
 //
 //  Performance notes:
-//    - NORM_LM constant table: eliminates sqrt() from Legendre recurrence
-//    - Chebyshev trig recurrence: one sincos() per particle, ~4 FMAs per m
+//    - On-the-fly NORM_LM: pfact_cur recurrence, one sqrt() per (absm,l) pair
+//    - Rolling trig state: one sincos() per particle, 2 FMAs per m-group step
 //    - Template DO_GRAD: compiler eliminates dead branches
 //    - __launch_bounds__(256,2): guides register allocation
 //    - Separate x,y,z inputs: coalesced warp reads
 //
-//  Supported lmax <= 16.
+//  Supported lmax <= 32.
 // =============================================================================
 
 #include <math.h>
 
 // ---------------------------------------------------------------------------
 // Normalization constants from math_sphharm.cpp lines 26-35.
-// PREFACT[m] = |COEF[m]|  where  P_m^m = COEF[m] * sin^m(theta)
+// PREFACT[m] = sqrt((2m+1)/(4*pi*(2m)!))  where  P_m^m = COEF[m] * sin^m(theta)
+// NORM_LM[l*(l+1)+m] = PREFACT[m] * prod_{l'=m+1}^{l} sqrt((2l'+1)/(2l'-1)*(l'-m)/(l'+m))
+// is computed on-the-fly via pfact_cur recurrence (no table needed).
 // ---------------------------------------------------------------------------
 
-__constant__ double PREFACT[17] = {
+__constant__ double PREFACT[33] = {
     0.2820947917738782,   0.3454941494713355,   0.1287580673410632,
     0.02781492157551894,  0.004214597070904597, 0.0004911451888263050,
     4.647273819914057e-05, 3.700296470718545e-06, 2.542785532478802e-07,
     1.536743406172476e-08, 8.287860012085477e-10, 4.035298721198747e-11,
     1.790656309174350e-12, 7.299068453727266e-14, 2.751209457796109e-15,
-    9.643748535232993e-17, 3.159120301003413e-18
+    9.643748535232993e-17, 3.159120301003413e-18,
+    // m=17..32
+    9.7128523792757254e-20, 2.8133797388083950e-21, 7.7031283932527611e-23,
+    1.9996982303404461e-24, 4.9350344437027067e-26, 1.1606510034403700e-27,
+    2.6071087700583650e-29, 5.6045237507440526e-31, 1.1551615366899411e-32,
+    2.2866979724449814e-34, 4.3542905194887202e-36, 7.9872656096230955e-38,
+    1.4133029977144382e-39, 2.4153082278063579e-41, 3.9913255828701590e-43,
+    6.3847411917613422e-45
 };
 
-__constant__ double COEF[17] = {
+__constant__ double COEF[33] = {
      0.2820947917738782, -0.3454941494713355,  0.3862742020231896,
     -0.4172238236327841,  0.4425326924449826,  -0.4641322034408582,
      0.4830841135800662, -0.5000395635705506,   0.5154289843972843,
     -0.5295529414924496,  0.5426302919442215,  -0.5548257538066191,
      0.5662666637421912, -0.5770536647012670,   0.5872677968601020,
-    -0.5969753602424046,  0.6062313441538353
-};
-
-// ---------------------------------------------------------------------------
-// NORM_LM[c] = fully accumulated normalization factor at flat index c=l*(l+1)+m.
-// NORM_LM[l*(l+1)+m] = PREFACT[m] * prod_{l'=m+1}^{l} sqrt((2l'+1)/(2l'-1)*(l'-m)/(l'+m))
-// ---------------------------------------------------------------------------
-
-__constant__ double NORM_LM[289] = {
-    2.8209479177387820e-01, 0.0000000000000000e+00, 4.8860251190291998e-01, 3.4549414947133550e-01,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 6.3078313050504009e-01, 2.5751613468212642e-01,
-    1.2875806734106321e-01, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    7.4635266518023091e-01, 2.1545345607610047e-01, 6.8132365095552164e-02, 2.7814921575518941e-02,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    8.4628437532163459e-01, 1.8923493915151207e-01, 4.4603102903819289e-02, 1.1920680675222404e-02,
-    4.2145970709045969e-03, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 9.3560257962738902e-01, 1.7081687924064815e-01,
-    3.2281355871636185e-02, 6.5894041742255291e-03, 1.5531374585246046e-03, 4.9114518882630498e-04,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 1.0171072362820550e+00, 1.5694305382900609e-01,
-    2.4814875652103462e-02, 4.1358126086839097e-03, 7.5509261979682136e-04, 1.6098628745551689e-04,
-    4.6472738199140567e-05, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    1.0925484305920792e+00, 1.4599792520475469e-01, 1.9867801125370677e-02, 2.8097313806030645e-03,
-    4.2358294323398304e-04, 7.0597157205663839e-05, 1.3845241622917590e-05, 3.7002964707185449e-06,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    1.1631066229203197e+00, 1.3707343005165717e-01, 1.6383408517733743e-02, 2.0166581817713460e-03,
-    2.6034945176644505e-04, 3.6103972995494481e-05, 5.5709639801456997e-06, 1.0171142129915205e-06,
-    2.5427855324788019e-07, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 1.2296226898414842e+00, 1.2961361208406261e-01,
-    1.3816857472880173e-02, 1.5075427437116580e-03, 1.7069560266960422e-04, 2.0402026779828733e-05,
-    2.6338903315718134e-06, 3.8016932298723471e-07, 6.5198501006896228e-08, 1.5367434061724761e-08,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 1.2927207364566031e+00, 1.2325608605533819e-01,
-    1.1860322410551530e-02, 1.1630002963250777e-03, 1.1748077086477522e-04, 1.2383560573501302e-05,
-    1.3845241622917595e-06, 1.6789821653966854e-07, 2.2848053291417064e-08, 3.7064436750050733e-09,
-    8.2878600120854774e-10, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    1.3528790949515030e+00, 1.1775301082031181e-01, 1.0327622243750185e-02, 9.2005771562235072e-04,
-    8.3989394175505792e-05, 7.9362517769773305e-06, 7.8580601974183673e-07, 8.2831227381848063e-08,
-    9.5013934086030256e-09, 1.2266246145761483e-09, 1.8927228717505940e-10, 4.0352987211987470e-11,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    1.4104739588693913e+00, 1.1292829551195402e-01, 9.1000213811776830e-03, 7.4301363441007791e-04,
-    6.1917802867506483e-05, 5.3094077934550720e-06, 4.7299964023276903e-07, 4.4300475192525714e-08,
-    4.4300475192525726e-09, 4.8335781164824416e-10, 5.9497233712289827e-11, 8.7723885243451015e-12,
-    1.7906563091743501e-12, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 1.4658075357087605e+00, 1.0865288342008114e-01,
-    8.0985077759553742e-03, 6.1044799215044456e-04, 4.6819223749156532e-05, 3.6784656225465392e-06,
-    2.9836296043507733e-07, 2.5216272546510160e-08, 2.2464441057274933e-09, 2.1419004136424348e-10,
-    2.2330855485962905e-11, 2.6317165573035307e-12, 3.7218092476604861e-13, 7.2990684537272655e-14,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 1.5191269449366254e+00, 1.0482971849697341e-01,
-    7.2686331775633339e-03, 5.0890611383235819e-04, 3.6166382675602854e-05, 2.6237851683540062e-06,
-    1.9556539982650959e-07, 1.5088198164953164e-08, 1.2158416567084866e-09, 1.0349931506416358e-10,
-    9.4481515911627671e-12, 9.4481515911627658e-13, 1.0697925061790326e-13, 1.4558032059954717e-14,
-    2.7512094577961089e-15, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    1.5706373285785551e+00, 1.0138420360860752e-01, 6.5717618288470159e-03, 4.2960951030737357e-04,
-    2.8451584865249228e-05, 1.9182054603012299e-06, 1.3236875238963260e-07, 9.4070376108560291e-09,
-    6.9349601348365155e-10, 5.3504379032941761e-11, 4.3686142545058030e-12, 3.8315281651733123e-13,
-    3.6868896959507437e-14, 4.0227264549159520e-15, 5.2820986116545115e-16, 9.6437485352329924e-17,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00, 0.0000000000000000e+00,
-    1.6205112036071443e+00, 9.8257924411309761e-02, 5.9797868504124288e-03, 3.6664425597227604e-04,
-    2.2738311489089525e-05, 1.4323789865155638e-06, 9.2076808599479035e-08, 6.0713649643097745e-09,
-    4.1310406124360974e-10, 2.9210868304105939e-11, 2.1652536169495931e-12, 1.7011839061486178e-13,
-    1.4377628163571825e-14, 1.3349292620091874e-15, 1.4071389943855713e-16, 1.7870683099388800e-17,
-    3.1591203010034129e-18,
+    -0.5969753602424046,  0.6062313441538353,
+    // m=17..32
+    -0.6150819049288285,  0.6235661940609217, -0.6317177321159495,
+     0.6395654582577622, -0.6471345437139063,  0.6544470305506929,
+    -0.6615223392074217,  0.6683776760786229, -0.6750283640247020,
+     0.6814881127780765, -0.6877692419885917,  0.6938828665927833,
+    -0.6998390519465775,  0.7056469444937100, -0.7113148824901042,
+     0.7168504903544893
 };
 
 // 2*sqrt(pi) and 2*sqrt(2*pi)
@@ -230,7 +165,7 @@ multipole_eval_device(
 
     if (r < 1.0e-300) {
         // At exact origin: Phi = W (finite), force = 0
-        phi_out[tid] = MUL0 * inner_W * NORM_LM[0];
+        phi_out[tid] = MUL0 * inner_W * PREFACT[0];
         if (DO_GRAD) { grad_out[3*tid]=0.; grad_out[3*tid+1]=0.; grad_out[3*tid+2]=0.; }
         return;
     }
@@ -243,13 +178,13 @@ multipole_eval_device(
         double dlr = logr - logr_min;  // negative
         double r_ratio_s = (inner_s != 0.0) ? exp(inner_s * dlr) : 1.0;
         double Phi0 = inner_U * r_ratio_s + inner_W;
-        phi_out[tid] = MUL0 * Phi0 * NORM_LM[0];  // l=0 only (higher l vanish as r^l → 0)
+        phi_out[tid] = MUL0 * Phi0 * PREFACT[0];  // l=0 only (higher l vanish as r^l → 0)
         if (DO_GRAD) {
             // dPhi/d(logr) = U * s * (r/r0)^s
             double dPhi0_dlr = inner_U * inner_s * r_ratio_s;
             double inv_r2 = 1.0 / r2;
             // gradient = dPhi/dlogr * (x/r²) for each component
-            double g = MUL0 * dPhi0_dlr * NORM_LM[0];
+            double g = MUL0 * dPhi0_dlr * PREFACT[0];
             grad_out[3*tid+0] = g * (px * inv_r2);
             grad_out[3*tid+1] = g * (py * inv_r2);
             grad_out[3*tid+2] = g * (pz * inv_r2);
@@ -266,10 +201,10 @@ multipole_eval_device(
         double exp_neg  = exp(-dlr);
         double exp_s    = exp(outer_s * dlr);
         double Phi0     = outer_W * exp_neg + outer_U * exp_s;
-        phi_out[tid]    = MUL0 * Phi0 * NORM_LM[0];
+        phi_out[tid]    = MUL0 * Phi0 * PREFACT[0];
         if (DO_GRAD) {
             double dPhi0_dlr = -outer_W * exp_neg + outer_s * outer_U * exp_s;
-            double g = MUL0 * dPhi0_dlr * NORM_LM[0];
+            double g = MUL0 * dPhi0_dlr * PREFACT[0];
             double inv_r2 = 1.0 / r2;
             grad_out[3*tid+0] = g * px * inv_r2;
             grad_out[3*tid+1] = g * py * inv_r2;
@@ -284,20 +219,13 @@ multipole_eval_device(
     double sin_theta = Rcyl / r;
     double phi_az    = atan2(py, px);
 
-    // Chebyshev trig recurrence
-    double cos_mf[17], sin_mf[17];
-    cos_mf[0] = 1.0; sin_mf[0] = 0.0;
-    {
-        double cph, sph;
-        sincos(phi_az, &sph, &cph);
-        if (lmax >= 1) { cos_mf[1] = cph; sin_mf[1] = sph; }
-        for (int m = 2; m <= lmax; m++) {
-            cos_mf[m] = cph*cos_mf[m-1] - sph*sin_mf[m-1];
-            sin_mf[m] = sph*cos_mf[m-1] + cph*sin_mf[m-1];
-        }
-    }
+    // Rolling trig state: cm = cos(absm*phi), sm = sin(absm*phi).
+    // Advanced once per m-group via: cm_new = cm*cph - sm*sph; sm = sm*cph + cm*sph.
+    double cph, sph;
+    sincos(phi_az, &sph, &cph);
+    double cm = 1.0, sm = 0.0;  // cos(0), sin(0)
 
-    // P_0^0 = NORM_LM[0] (constant), dP_0^0/dθ = 0 — no arrays needed.
+    // P_0^0 = PREFACT[0] (constant), dP_0^0/dθ = 0 — no arrays needed.
     const bool near_pole = (sin_theta < 1.0e-10);
 
     double Phi            = 0.0;
@@ -327,9 +255,9 @@ multipole_eval_device(
         if (DO_GRAD) dC0_dlr = dC0_sc_ds * inv_dlogr;
     }
 
-    // c=0: Ylm=NORM_LM[0], dYlm=0 (constant), Tlm=1
-    Phi += MUL0 * C0_val * NORM_LM[0];
-    if (DO_GRAD) dPhi_dlogr += MUL0 * dC0_dlr * NORM_LM[0];
+    // c=0: Ylm=PREFACT[0], dYlm=0 (constant), Tlm=1
+    Phi += MUL0 * C0_val * PREFACT[0];
+    if (DO_GRAD) dPhi_dlogr += MUL0 * dC0_dlr * PREFACT[0];
     // dPhi_dtheta += 0; dPhi_dphi_os += 0
 
     // -----------------------------------------------------------------------
@@ -337,7 +265,7 @@ multipole_eval_device(
     // Replaces Plm_arr[289]/dPlm_arr[289] with ~8 registers per m-group.
     //   raw_cur/prev  = P_l^|m| / PREFACT[|m|]   (un-normalized)
     //   der_cur/prev  = d/dθ of the above
-    // Plm_val = raw_cur * NORM_LM[l*(l+1)+absm]
+    //   pfact_cur     = NORM_LM[l*(l+1)+absm]  (on-the-fly, updated per l)
     // -----------------------------------------------------------------------
     double sin_pow = 1.0;  // sin^absm; updated at end of each m-group
     int ci = 1;            // cursor through sorted lm arrays; c=0 already done
@@ -347,11 +275,13 @@ multipole_eval_device(
         int ci_absm = (lm_m[ci] >= 0) ? lm_m[ci] : -lm_m[ci];
         if (ci_absm != absm) {
             sin_pow = (absm == 0) ? sin_theta : sin_pow * sin_theta;
+            { double _t = cm*cph - sm*sph; sm = sm*cph + cm*sph; cm = _t; }
             continue;
         }
 
         // --- Initialize P_m^m / PREFACT[m] ---
         double pf = PREFACT[absm];
+        double pfact_cur = pf;  // = NORM_LM[absm*(absm+1)+absm]; advanced per l in l-loop
         double raw_prev;  // holds P_{l}^absm/PREFACT at l=absm
         double der_prev = 0.0;
         if (absm == 0) {
@@ -373,10 +303,11 @@ multipole_eval_device(
 
         // Helper macro: accumulate one active term at (l_val, m_val=±absm, ci_idx)
         // Uses raw_lm = raw_cur (l > absm) or raw_prev (l == absm).
+        // pfact_cur = NORM_LM[l_val*(l_val+1)+absm] (maintained by caller).
+        // cm/sm = cos(absm*phi) / sin(absm*phi) (rolling state, outer scope).
 #define ACCUM_LM(ci_idx, l_val, m_val, raw_lm, der_lm)                          \
         {                                                                         \
-            double _nlm  = NORM_LM[(l_val)*((l_val)+1)+absm];                   \
-            double _Ylm  = (raw_lm) * _nlm;                                      \
+            double _Ylm  = (raw_lm) * pfact_cur;                                 \
             double _Cc_sc, _dCc_sc_ds = 0.0;                                     \
             quintic_eval(poly, (ci_idx), k, n_intervals, s,                      \
                          &_Cc_sc, DO_GRAD ? &_dCc_sc_ds : (double*)0, (double*)0); \
@@ -389,13 +320,13 @@ multipole_eval_device(
                 if (DO_GRAD) _dCv = _dCc_sc_ds * inv_dlogr;                     \
             }                                                                     \
             double _mul = (absm == 0) ? MUL0 : MUL1;                            \
-            double _Tlm = ((m_val) >= 0) ? cos_mf[absm] : sin_mf[absm];         \
+            double _Tlm = ((m_val) >= 0) ? cm : sm;                              \
             Phi += _mul * _Cv * _Ylm * _Tlm;                                     \
             if (DO_GRAD) {                                                        \
-                double _dYlm = (der_lm) * _nlm;                                  \
+                double _dYlm = (der_lm) * pfact_cur;                             \
                 double _dTlm = ((m_val) >= 0)                                    \
-                    ? -(double)absm * sin_mf[absm]                               \
-                    :  (double)absm * cos_mf[absm];                              \
+                    ? -(double)absm * sm                                          \
+                    :  (double)absm * cm;                                         \
                 dPhi_dlogr  += _mul * _dCv  * _Ylm * _Tlm;                      \
                 dPhi_dtheta += _mul * _Cv   * _dYlm * _Tlm;                     \
                 double _Pos = (absm == 0) ? 0.0                                  \
@@ -428,6 +359,8 @@ multipole_eval_device(
                 raw_prev = raw_cur; der_prev = der_cur;
                 raw_cur  = nr;      der_cur  = nd;
             }
+            // pfact_cur advances from PREFACT[absm] → NORM_LM[l*(l+1)+absm]
+            pfact_cur *= sqrt((2.0*l+1)/(2.0*l-1) * (double)(l-absm)/(double)(l+absm));
             if (ci >= n_lm) break;
             if (lm_l[ci] != l) {
                 // Not active at l but next ci has higher l (same absm or different)
@@ -449,6 +382,7 @@ multipole_eval_device(
 #undef ACCUM_LM
 
         sin_pow = (absm == 0) ? sin_theta : sin_pow * sin_theta;
+        { double _t = cm*cph - sm*sph; sm = sm*cph + cm*sph; cm = _t; }
     }
 
     phi_out[tid] = Phi;
@@ -556,7 +490,7 @@ multipole_hess_kernel(
     double Rcyl = sqrt(px*px + py*py);
 
     if (r < 1.0e-300) {
-        phi_out[tid] = MUL0 * inner_W * NORM_LM[0];
+        phi_out[tid] = MUL0 * inner_W * PREFACT[0];
         for (int i=0;i<3;i++) grad_out[3*tid+i]=0.;
         for (int i=0;i<6;i++) hess_out[6*tid+i]=0.;
         return;
@@ -569,18 +503,18 @@ multipole_hess_kernel(
         double dlr = logr - logr_min;
         double r_ratio_s = (inner_s != 0.0) ? exp(inner_s * dlr) : 1.0;
         double Phi0 = inner_U * r_ratio_s + inner_W;
-        phi_out[tid] = MUL0 * Phi0 * NORM_LM[0];
+        phi_out[tid] = MUL0 * Phi0 * PREFACT[0];
         double dPhi0_dlr = inner_U * inner_s * r_ratio_s;
         double d2Phi0_dlr2 = inner_U * inner_s * inner_s * r_ratio_s;
-        double g = MUL0 * dPhi0_dlr * NORM_LM[0];
+        double g = MUL0 * dPhi0_dlr * PREFACT[0];
         double inv_r2 = 1.0 / r2;
         grad_out[3*tid+0] = g * px * inv_r2;
         grad_out[3*tid+1] = g * py * inv_r2;
         grad_out[3*tid+2] = g * pz * inv_r2;
         // Hessian: d2Phi/dxi dxj = (d2Phi/dlogr^2 - dPhi/dlogr)*xi*xj/r^4
         //                         + dPhi/dlogr * delta_ij / r^2
-        double A = MUL0 * NORM_LM[0] * (d2Phi0_dlr2 - dPhi0_dlr) * inv_r2 * inv_r2;
-        double B = MUL0 * NORM_LM[0] * dPhi0_dlr * inv_r2;
+        double A = MUL0 * PREFACT[0] * (d2Phi0_dlr2 - dPhi0_dlr) * inv_r2 * inv_r2;
+        double B = MUL0 * PREFACT[0] * dPhi0_dlr * inv_r2;
         double coords[3] = {px, py, pz};
         int ii[6]={0,1,2,0,1,0}, jj[6]={0,1,2,1,2,2};
         for (int p=0;p<6;p++)
@@ -599,14 +533,14 @@ multipole_hess_kernel(
         double Phi0      = outer_W * exp_neg + outer_U * exp_s;
         double dPhi0     = -outer_W * exp_neg + outer_s * outer_U * exp_s;
         double d2Phi0    = outer_W * exp_neg + outer_s * outer_s * outer_U * exp_s;
-        phi_out[tid] = MUL0 * Phi0 * NORM_LM[0];
+        phi_out[tid] = MUL0 * Phi0 * PREFACT[0];
         double inv_r2 = 1.0 / r2;
-        double g = MUL0 * dPhi0 * NORM_LM[0];
+        double g = MUL0 * dPhi0 * PREFACT[0];
         grad_out[3*tid+0] = g * px * inv_r2;
         grad_out[3*tid+1] = g * py * inv_r2;
         grad_out[3*tid+2] = g * pz * inv_r2;
-        double A = MUL0 * NORM_LM[0] * (d2Phi0 - dPhi0) * inv_r2 * inv_r2;
-        double B = MUL0 * NORM_LM[0] * dPhi0 * inv_r2;
+        double A = MUL0 * PREFACT[0] * (d2Phi0 - dPhi0) * inv_r2 * inv_r2;
+        double B = MUL0 * PREFACT[0] * dPhi0 * inv_r2;
         double coords[3] = {px, py, pz};
         int ii[6]={0,1,2,0,1,0}, jj[6]={0,1,2,1,2,2};
         for (int p=0;p<6;p++)
@@ -620,17 +554,9 @@ multipole_hess_kernel(
     double sin_theta = Rcyl / r;
     double phi_az    = atan2(py, px);
 
-    double cos_mf[17], sin_mf[17];
-    cos_mf[0] = 1.0; sin_mf[0] = 0.0;
-    {
-        double cph, sph;
-        sincos(phi_az, &sph, &cph);
-        if (lmax >= 1) { cos_mf[1] = cph; sin_mf[1] = sph; }
-        for (int m = 2; m <= lmax; m++) {
-            cos_mf[m] = cph*cos_mf[m-1] - sph*sin_mf[m-1];
-            sin_mf[m] = sph*cos_mf[m-1] + cph*sin_mf[m-1];
-        }
-    }
+    double cph, sph;
+    sincos(phi_az, &sph, &cph);
+    double cm = 1.0, sm = 0.0;  // rolling: cos(absm*phi), sin(absm*phi)
 
     double Phi=0., dPhi_dlr=0., d2Phi_dlr2=0.;
     double dPhi_dth=0., d2Phi_dth2=0., d2Phi_dlr_dth=0.;
@@ -661,10 +587,10 @@ multipole_hess_kernel(
         d2C0_dlr2 = d2Phi0_dlr2;
     }
 
-    // c=0 angular contribution (l=0, m=0):  P_0^0 = NORM_LM[0] (constant), dP=0, d2P=0
-    Phi              += MUL0 * C0_val    * NORM_LM[0];
-    dPhi_dlr         += MUL0 * dC0_dlr   * NORM_LM[0];
-    d2Phi_dlr2       += MUL0 * d2C0_dlr2 * NORM_LM[0];
+    // c=0 angular contribution (l=0, m=0):  P_0^0 = PREFACT[0] (constant), dP=0, d2P=0
+    Phi              += MUL0 * C0_val    * PREFACT[0];
+    dPhi_dlr         += MUL0 * dC0_dlr   * PREFACT[0];
+    d2Phi_dlr2       += MUL0 * d2C0_dlr2 * PREFACT[0];
     // dPhi_dth, d2Phi_dth2, d2Phi_dlr_dth all 0 (dP_0^0/dθ = 0)
 
     // -----------------------------------------------------------------------
@@ -678,9 +604,8 @@ multipole_hess_kernel(
 
 #define ACCUM_HESS(ci_idx, l_val, m_val, raw_lm, der_lm)                            \
     {                                                                                 \
-        double _nlm   = NORM_LM[(l_val)*((l_val)+1)+absm];                          \
-        double _Ylm   = (raw_lm) * _nlm;                                             \
-        double _dYlm  = (der_lm) * _nlm;                                             \
+        double _Ylm   = (raw_lm) * pfact_cur;                                        \
+        double _dYlm  = (der_lm) * pfact_cur;                                        \
         double _d2Ylm = near_pole ? 0.0 :                                            \
             (-cos_theta/sin_theta * _dYlm                                            \
              - ((double)((l_val)*((l_val)+1)) - (double)(absm*absm)                  \
@@ -696,9 +621,9 @@ multipole_hess_kernel(
             _Cv  = _Cc_sc * C0_val;                                                  \
         }                                                                             \
         double _mul   = (absm==0) ? MUL0 : MUL1;                                    \
-        double _Tlm   = ((m_val)>=0) ? cos_mf[absm] : sin_mf[absm];                \
-        double _dTlm  = ((m_val)>=0) ? -(double)absm*sin_mf[absm]                   \
-                                      :  (double)absm*cos_mf[absm];                  \
+        double _Tlm   = ((m_val)>=0) ? cm : sm;                                      \
+        double _dTlm  = ((m_val)>=0) ? -(double)absm*sm                              \
+                                      :  (double)absm*cm;                             \
         double _d2Tlm = -(double)(absm*absm) * _Tlm;                                \
         double _YT   = _Ylm*_Tlm,  _dYT  = _dYlm*_Tlm,  _d2YT  = _d2Ylm*_Tlm;    \
         double _YdT  = _Ylm*_dTlm, _dYdT = _dYlm*_dTlm, _Yd2T  = _Ylm*_d2Tlm;    \
@@ -726,9 +651,11 @@ multipole_hess_kernel(
         int ci_absm = (lm_m[ci] >= 0) ? lm_m[ci] : -lm_m[ci];
         if (ci_absm != absm) {
             sin_pow = (absm == 0) ? sin_theta : sin_pow * sin_theta;
+            { double _t = cm*cph - sm*sph; sm = sm*cph + cm*sph; cm = _t; }
             continue;
         }
         double pf = PREFACT[absm];
+        double pfact_cur = pf;
         double raw_prev;
         if      (absm == 0) raw_prev = 1.0;
         else if (absm == 1) raw_prev = -sin_theta;
@@ -760,6 +687,7 @@ multipole_hess_kernel(
                 raw_prev = raw_cur;  der_prev = der_cur;
                 raw_cur  = nr;       der_cur  = nd;
             }
+            pfact_cur *= sqrt((2.0*l+1)/(2.0*l-1) * (double)(l-absm)/(double)(l+absm));
             if (ci >= n_lm) break;
             if (lm_l[ci] != l) {
                 int na2 = (lm_m[ci] >= 0) ? lm_m[ci] : -lm_m[ci];
@@ -777,6 +705,7 @@ multipole_hess_kernel(
         }
 #undef ACCUM_HESS
         sin_pow = (absm == 0) ? sin_theta : sin_pow * sin_theta;
+        { double _t = cm*cph - sm*sph; sm = sm*cph + cm*sph; cm = _t; }
     }
 
     phi_out[tid] = Phi;
@@ -913,7 +842,7 @@ multipole_density_kernel(
         double dC_dlr = inner_U * inner_s * r_ratio_s;
         double d2C_dlr2 = inner_U * inner_s * inner_s * r_ratio_s;
         double laplacian = (d2C_dlr2 + dC_dlr) / (r * r);
-        rho_out[tid] = MUL0 * NORM_LM[0] * laplacian * inv_4piG;
+        rho_out[tid] = MUL0 * PREFACT[0] * laplacian * inv_4piG;
         return;
     }
 
@@ -925,17 +854,11 @@ multipole_density_kernel(
 
     double cos_theta=pz/r, sin_theta=Rcyl/r, phi_az=atan2(py,px);
 
-    double cos_mf[17], sin_mf[17];
-    cos_mf[0]=1.; sin_mf[0]=0.;
-    { double cph,sph; sincos(phi_az,&sph,&cph);
-      if (lmax>=1) {cos_mf[1]=cph; sin_mf[1]=sph;}
-      for(int m=2;m<=lmax;m++){
-          cos_mf[m]=cph*cos_mf[m-1]-sph*sin_mf[m-1];
-          sin_mf[m]=sph*cos_mf[m-1]+cph*sin_mf[m-1];
-      }
-    }
+    double cph, sph;
+    sincos(phi_az, &sph, &cph);
+    double cm = 1.0, sm = 0.0;  // rolling: cos(absm*phi), sin(absm*phi)
 
-    // c=0: evaluate + log-scaling inverse.  P_0^0 = NORM_LM[0] (constant).
+    // c=0: evaluate + log-scaling inverse.  P_0^0 = PREFACT[0] (constant).
     double C0_sc, dC0_sc_ds, d2C0_sc_ds2;
     quintic_eval(poly, 0, k, n_intervals, s, &C0_sc, &dC0_sc_ds, &d2C0_sc_ds2);
     double C0_val    = C0_sc;
@@ -954,7 +877,7 @@ multipole_density_kernel(
     }
 
     double inv_r2 = 1.0 / r2;
-    double lap_sum = (d2C0_dlr2 + dC0_dlr) * inv_r2 * NORM_LM[0] * MUL0;  // l(l+1)=0
+    double lap_sum = (d2C0_dlr2 + dC0_dlr) * inv_r2 * PREFACT[0] * MUL0;  // l(l+1)=0
 
     // -----------------------------------------------------------------------
     // c>0: on-the-fly Legendre (lm sorted by |m|, l).  No Plm_arr needed.
@@ -966,9 +889,11 @@ multipole_density_kernel(
         int ci_absm = (lm_m[ci] >= 0) ? lm_m[ci] : -lm_m[ci];
         if (ci_absm != absm) {
             sin_pow = (absm == 0) ? sin_theta : sin_pow * sin_theta;
+            { double _t = cm*cph - sm*sph; sm = sm*cph + cm*sph; cm = _t; }
             continue;
         }
         double pf = PREFACT[absm];
+        double pfact_cur = pf;
         double raw_prev;
         if      (absm == 0) raw_prev = 1.0;
         else if (absm == 1) raw_prev = -sin_theta;
@@ -977,8 +902,7 @@ multipole_density_kernel(
 
 #define ACCUM_DEN(ci_idx, l_val, m_val, raw_lm)                                 \
         {                                                                         \
-            double _nlm = NORM_LM[(l_val)*((l_val)+1)+absm];                    \
-            double _Plm = (raw_lm) * _nlm;                                       \
+            double _Plm = (raw_lm) * pfact_cur;                                  \
             double _Cc, _dC, _d2C;                                               \
             quintic_eval(poly,(ci_idx),k,n_intervals,s,&_Cc,&_dC,&_d2C);        \
             double _dlr = _dC*inv_dlogr, _d2lr = _d2C*inv_dlogr*inv_dlogr;      \
@@ -990,7 +914,7 @@ multipole_density_kernel(
             }                                                                     \
             double _lap = (_d2v+_dv-(double)((l_val)*((l_val)+1))*_Cv)*inv_r2;  \
             double _mul = (absm==0) ? MUL0 : MUL1;                              \
-            double _Tlm = ((m_val)>=0) ? cos_mf[absm] : sin_mf[absm];          \
+            double _Tlm = ((m_val)>=0) ? cm : sm;                               \
             lap_sum += _mul * _lap * _Plm * _Tlm;                                \
         }
 
@@ -1009,6 +933,7 @@ multipole_density_kernel(
                 raw_prev = raw_cur;
                 raw_cur  = nr;
             }
+            pfact_cur *= sqrt((2.0*l+1)/(2.0*l-1) * (double)(l-absm)/(double)(l+absm));
             if (ci >= n_lm) break;
             if (lm_l[ci] != l) {
                 int na2 = (lm_m[ci] >= 0) ? lm_m[ci] : -lm_m[ci];
@@ -1026,6 +951,7 @@ multipole_density_kernel(
         }
 #undef ACCUM_DEN
         sin_pow = (absm == 0) ? sin_theta : sin_pow * sin_theta;
+        { double _t = cm*cph - sm*sph; sm = sm*cph + cm*sph; cm = _t; }
     }
 
     rho_out[tid] = inv_4piG * lap_sum;

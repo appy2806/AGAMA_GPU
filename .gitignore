@@ -1,5 +1,6 @@
 # User requested
 *.md
+!README.md
 
 # Python
 __pycache__/
