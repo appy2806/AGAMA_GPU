@@ -66,6 +66,9 @@ except ImportError as _err:
 _KERNEL_FILE = Path(__file__).parent / "_multipole_potential_kernel.cu"
 _MODULE: cp.RawModule | None = None
 
+_CYLSPL_KERNEL_FILE = Path(__file__).parent / "_cylspl_potential_kernel.cu"
+_CYLSPL_MODULE: cp.RawModule | None = None
+
 # Radius-sort threshold.
 # On modern GPUs (L40/A100 with 96 MB L2 cache), the poly array for any
 # realistic lmax fits entirely in L2 without sorting.  argsort+scatter adds
@@ -116,6 +119,26 @@ def _get_module() -> cp.RawModule:
 
 def _get_kernel(name: str) -> cp.RawKernel:
     return _get_module().get_function(name)
+
+
+def _get_cylspl_module() -> cp.RawModule:
+    global _CYLSPL_MODULE
+    if _CYLSPL_MODULE is None:
+        if not _CYLSPL_KERNEL_FILE.exists():
+            raise FileNotFoundError(
+                f"CylSpline CUDA kernel file not found: {_CYLSPL_KERNEL_FILE}\n"
+                "Expected _cylspl_potential_kernel.cu in the same directory as gpu_potential.py."
+            )
+        _CYLSPL_MODULE = cp.RawModule(
+            code=_CYLSPL_KERNEL_FILE.read_text(),
+            backend="nvcc",
+            options=("--use_fast_math", "-std=c++14"),
+        )
+    return _CYLSPL_MODULE
+
+
+def _get_cylspl_kernel(name: str) -> cp.RawKernel:
+    return _get_cylspl_module().get_function(name)
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +411,7 @@ def _build_multipole_data(coefs, prune_threshold: float = 1e-16) -> dict:
     are determined by the tridiagonal system (constructQuinticSpline).
 
     Polynomial layout per interval:
-        C(s) = a0 + s*(a1 + s*(a2 + s*(a3 + s*(a4 + s*a5))))   s∈[0,1]
+        C(s) = a0 + s*(a1 + s*(a2 + s*(a3 + s*(a4 + s*a5))))   s ∈ [0,1]
     with boundary conditions C(0)=f0, C'(0)=m0, C''(0)=q0,
                               C(1)=f1, C'(1)=m1, C''(1)=q1
 
@@ -869,6 +892,497 @@ class MultipolePotentialGPU(_GPUPotBase):
         acc : bool   — include acceleration (= force = −gradPhi)
         der : bool   — include force derivatives (−d2Phi/dx_i dx_j, shape (N,6))
         """
+        if not (pot or acc or der):
+            raise ValueError("eval(): at least one of pot, acc, der must be True.")
+        if der:
+            phi_r, force_r, deriv_r = self.evalDeriv(xyz, t)
+            results = []
+            if pot: results.append(phi_r)
+            if acc: results.append(force_r)
+            if der: results.append(deriv_r)
+        elif acc:
+            force_r = self.force(xyz, t)
+            results = []
+            if pot: results.append(self.potential(xyz, t))
+            results.append(force_r)
+        else:
+            results = [self.potential(xyz, t)]
+        return results[0] if len(results) == 1 else tuple(results)
+
+
+# ---------------------------------------------------------------------------
+# CylSpline preprocessing helpers
+# ---------------------------------------------------------------------------
+
+# Agama normalization constants — match _cylspl_potential_kernel.cu exactly
+_CS_PREFACT = np.array([
+    0.2820947917738782,   0.3454941494713355,   0.1287580673410632,
+    0.02781492157551894,  0.004214597070904597, 0.0004911451888263050,
+    4.647273819914057e-05, 3.700296470718545e-06, 2.542785532478802e-07,
+    1.536743406172476e-08, 8.287860012085477e-10, 4.035298721198747e-11,
+    1.790656309174350e-12, 7.299068453727266e-14, 2.751209457796109e-15,
+    9.643748535232993e-17, 3.159120301003413e-18,
+])
+_CS_COEF = np.array([
+     0.2820947917738782, -0.3454941494713355,  0.3862742020231896,
+    -0.4172238236327841,  0.4425326924449826, -0.4641322034408582,
+     0.4830841135800662, -0.5000395635705506,  0.5154289843972843,
+    -0.5295529414924496,  0.5426302919442215, -0.5548257538066191,
+     0.5662666637421912, -0.5770536647012670,  0.5872677968601020,
+    -0.5969753602424046,  0.6062313441538353,
+])
+_CS_MUL0 = 3.5449077018110318   # 2*sqrt(pi)
+_CS_MUL1 = 5.0132565706694072   # 2*sqrt(2*pi)
+
+
+def _sph_harm_agama(lmax: int, m: int, ct: float, st: float) -> np.ndarray:
+    """
+    Compute Agama-normalized P_l^m(ct, st) for l = m .. lmax.
+
+    Matches the corrected sphHarm_device in _cylspl_potential_kernel.cu exactly.
+    ct = cos(theta) = z/r,  st = sin(theta) = R/r.
+
+    Returns array of shape (lmax - m + 1,).
+    """
+    n = lmax - m + 1
+    result = np.zeros(n)
+
+    # P_m^m = COEF[m] * st^m
+    val = _CS_COEF[m] * float(st) ** m
+    result[0] = val
+    if lmax == m:
+        return result
+
+    prefact = _CS_PREFACT[m]
+    Plm1 = result[0] / prefact        # un-normalized P_m^m
+    Plm  = ct * (2*m + 1) * Plm1     # un-normalized P_{m+1}^m
+    Plm2 = 0.0
+
+    # l = m+1: N_{m+1,m} = N_{m,m} * sqrt((2m+3)/(2m+1) / (2m+1))
+    prefact *= math.sqrt((2*m + 3) / (2*m + 1) / (2.0*m + 1.0))
+    result[1] = Plm * prefact
+
+    for l in range(m + 2, lmax + 1):
+        Plm_new = (ct * (2*l - 1) * Plm - (l + m - 1) * Plm2) / (l - m)
+        prefact *= math.sqrt((2*l + 1) / (2*l - 1) * (l - m) / (l + m))
+        result[l - m] = Plm_new * prefact
+        Plm2 = Plm1
+        Plm1 = Plm
+        Plm  = Plm_new
+
+    return result
+
+
+def _determine_asympt_cylspline(
+    R_grid: np.ndarray,
+    z_grid: np.ndarray,
+    phi_dict: dict,
+    mmax: int,
+    lmax_fit: int = 8,
+) -> Tuple[np.ndarray, float]:
+    """
+    Fit outer PowerLaw multipole coefficients matching Agama's determineAsympt().
+
+    Parameters
+    ----------
+    R_grid   : (nR,) radial grid (original, before asinh scaling) [kpc]
+    z_grid   : (nz,) z grid (full range or half-space) [kpc]
+    phi_dict : {m: (nR, nz) array} — Fourier amplitude tables (original, not log-scaled)
+    mmax     : max azimuthal order present in the data
+    lmax_fit : number of spherical harmonics to fit (Agama: LMAX_EXTRAPOLATION=8)
+
+    Returns
+    -------
+    W_outer  : (lmax_fit+1)^2 array indexed as W[l*(l+1)+m]
+    r0_outer : reference radius = min(R_grid[-1], max(|z_grid|))
+    """
+    from scipy.linalg import lstsq as _lstsq
+
+    nR   = len(R_grid)
+    nz   = len(z_grid)
+    zsym = (z_grid[0] == 0)
+    mmax_fit = min(lmax_fit, mmax)
+
+    # --- boundary points (replicates Agama's determineAsympt loop) ----------
+    Rp, zp, iRp, izp = [], [], [], []
+
+    for iR in range(nR - 1):
+        # top z edge
+        Rp.append(R_grid[iR]); zp.append(z_grid[nz-1]); iRp.append(iR); izp.append(nz-1)
+        if zsym:
+            Rp.append(R_grid[iR]); zp.append(-z_grid[nz-1]); iRp.append(iR); izp.append(nz-1)
+        else:
+            # bottom z edge
+            Rp.append(R_grid[iR]); zp.append(z_grid[0]); iRp.append(iR); izp.append(0)
+
+    for iz in range(nz):
+        # max R edge
+        Rp.append(R_grid[nR-1]); zp.append(z_grid[iz]); iRp.append(nR-1); izp.append(iz)
+        if zsym and iz > 0:
+            Rp.append(R_grid[nR-1]); zp.append(-z_grid[iz]); iRp.append(nR-1); izp.append(iz)
+
+    Rp   = np.array(Rp,  dtype=np.float64)
+    zp   = np.array(zp,  dtype=np.float64)
+    rp   = np.hypot(Rp, zp)
+    ct_p = zp / rp     # cos(theta) = z/r
+    st_p = Rp / rp     # sin(theta) = R/r
+
+    r0 = min(float(R_grid[-1]), float(np.max(np.abs(z_grid))))
+    ncoefs  = (lmax_fit + 1) ** 2
+    W = np.zeros(ncoefs)
+    npoints = len(Rp)
+
+    for m in range(-mmax_fit, mmax_fit + 1):
+        if m not in phi_dict:
+            continue
+        phi_m = phi_dict[m]    # (nR, nz)
+        absm  = abs(m)
+        ncols = lmax_fit - absm + 1
+        MUL   = _CS_MUL0 if m == 0 else _CS_MUL1
+
+        M   = np.zeros((npoints, ncols))
+        rhs = np.zeros(npoints)
+
+        for p in range(npoints):
+            rhs[p] = float(phi_m[iRp[p], izp[p]])
+            Plm = _sph_harm_agama(lmax_fit, absm, float(ct_p[p]), float(st_p[p]))
+            for l_idx in range(ncols):
+                l = absm + l_idx
+                M[p, l_idx] = Plm[l_idx] * (rp[p] / r0) ** (-(l + 1)) * MUL
+
+        sol, _, _, _ = _lstsq(M, rhs)
+        for l_idx in range(ncols):
+            l = absm + l_idx
+            W[l * (l + 1) + m] = float(sol[l_idx])
+
+    # Safeguard: if W[0] is not finite, fall back to average monopole amplitude
+    if not np.isfinite(W[0]):
+        phi0 = phi_dict.get(0)
+        if phi0 is not None:
+            avg = float(np.mean(
+                [phi0[iRp[p], izp[p]] * rp[p] / r0 for p in range(npoints)]
+            ))
+        else:
+            avg = 0.0
+        W[:] = 0.0
+        W[0] = avg
+
+    return W, float(r0)
+
+
+def _setup_cubic2d_nodes(lR: np.ndarray, lz: np.ndarray, fval: np.ndarray) -> np.ndarray:
+    """
+    Build CubicSpline2d node data (fval, fx, fy, fxy) for one harmonic.
+
+    Replicates Agama's CubicSpline2d constructor with:
+      deriv_xmin=0 (clamped at R=0), deriv_xmax=NAN (natural),
+      deriv_ymin=NAN, deriv_ymax=NAN (natural in z).
+
+    Parameters
+    ----------
+    lR   : (nR,) asinh-scaled R grid
+    lz   : (nz,) asinh-scaled z grid
+    fval : (nR, nz) values on the grid (possibly log-scaled)
+
+    Returns
+    -------
+    nodes : (nR, nz, 4) float64 — [fval, fx, fy, fxy] per node
+    """
+    from scipy.interpolate import CubicSpline as _CS
+
+    nR, nz = fval.shape
+    fx  = np.zeros((nR, nz))
+    fy  = np.zeros((nR, nz))
+    fxy = np.zeros((nR, nz))
+
+    # Step 1: natural cubic spline in lz for each R-row → fy = df/dlz
+    for i in range(nR):
+        spl = _CS(lz, fval[i, :], bc_type='natural')
+        fy[i, :] = spl(lz, 1)
+
+    # Step 2: clamped-left cubic spline in lR for each z-column → fx = df/dlR
+    # bc_type=((1, 0.0), 'natural'): f'=0 at lR[0], f''=0 at lR[-1]
+    for j in range(nz):
+        spl = _CS(lR, fval[:, j], bc_type=((1, 0.0), 'natural'))
+        fx[:, j] = spl(lR, 1)
+
+    # Step 3: clamped-left cubic spline in lR for each z-column → fxy = d(fy)/dlR
+    # Same BCs as step 2 (matches Agama's: isFinite(deriv_xmin)?0:NAN, NAN)
+    for j in range(nz):
+        spl = _CS(lR, fy[:, j], bc_type=((1, 0.0), 'natural'))
+        fxy[:, j] = spl(lR, 1)
+
+    return np.stack([fval, fx, fy, fxy], axis=-1).astype(np.float64)   # (nR, nz, 4)
+
+
+def _build_cylspline_data(coefs) -> dict:
+    """
+    Preprocess a CylSplineCoefs object into GPU-ready arrays.
+
+    Replicates the CylSpline C++ constructor from potential_cylspline.cpp:
+      - Rscale from -Mtot/Phi0
+      - asinh coordinate transform
+      - optional log-scaling of m=0 term and normalization of m≠0
+      - CubicSpline2d node arrays (fval, fx, fy, fxy) per harmonic
+      - outer PowerLaw multipole fit via determineAsympt
+
+    Returns
+    -------
+    dict with keys:
+      Rscale, lR_grid, lz_grid, node_arr, m_arr, n_harm, mmax,
+      log_scaling, W_outer, r0_outer, lmax_outer, mmax_outer
+    """
+    R_grid   = np.asarray(coefs.R_grid, dtype=np.float64)
+    z_grid_0 = np.asarray(coefs.z_grid, dtype=np.float64)
+    phi_orig = {m: np.asarray(v, dtype=np.float64) for m, v in coefs.phi.items()}
+
+    nR       = len(R_grid)
+    mmax     = max(abs(m) for m in phi_orig)
+
+    # ---------- Handle z-grid symmetry (matches Agama CylSpline constructor) --
+    zsym = (z_grid_0[0] == 0)   # half-space: z >= 0 only
+
+    if zsym:
+        # Mirror grid: [-z_N, ..., -z_1, 0, z_1, ..., z_N]
+        z_grid = np.concatenate([-z_grid_0[:0:-1], z_grid_0])
+        nz_0   = len(z_grid_0)
+        phi_dict = {}
+        for m, tab in phi_orig.items():
+            # tab is (nR, nz_0) covering z >= 0
+            # Mirror: Phi(R, -z) = Phi(R, z) for all m terms
+            full = np.empty((nR, 2 * nz_0 - 1))
+            full[:, nz_0 - 1:] = tab           # z >= 0 half
+            full[:, :nz_0]     = tab[:, ::-1]  # z <= 0 half (mirror)
+            phi_dict[m] = full
+        # Phi0 at R=0, z=0 -> first column of mirrored grid at iz = nz_0-1
+        Phi0 = phi_dict[0][0, nz_0 - 1]
+    else:
+        z_grid   = z_grid_0
+        phi_dict = phi_orig
+        nz       = len(z_grid)
+        # Phi0 at R=0, iz = (nz+1)//2  (matches C++: (sizez+1)/2)
+        iz_mid   = (nz + 1) // 2
+        Phi0     = phi_dict[0][0, iz_mid]
+
+    nz = len(z_grid)
+
+    # ---------- Outer asymptote fit (on original unscaled grids) ---------------
+    W_outer, r0_outer = _determine_asympt_cylspline(R_grid, z_grid, phi_dict, mmax)
+    lmax_outer  = 8
+    mmax_outer  = min(lmax_outer, mmax)
+
+    # Mtot ≈ -(asymptOuter at R_max, z=0) * R_max
+    # PowerLaw monopole at r = R_max: Phi_mono = W[0] * (R_max/r0)^{-1} * MUL0
+    # Mtot = -Phi_mono * R_max = -W_outer[0] * r0 * MUL0
+    Mtot = -W_outer[0] * r0_outer * _CS_MUL0
+
+    if Phi0 < 0.0 and Mtot > 0.0:
+        Rscale = -Mtot / Phi0
+    else:
+        Rscale = float(R_grid[nR // 2])
+
+    # ---------- Asinh-scaled coordinate grids ----------------------------------
+    lR_grid = np.arcsinh(R_grid / Rscale)
+    lz_grid = np.arcsinh(z_grid / Rscale)
+
+    # ---------- Log-scaling flag (all Phi[m=0] < 0?) --------------------------
+    log_scaling = bool(np.all(phi_dict[0] < 0.0))
+
+    # ---------- Build spline nodes for every harmonic --------------------------
+    m_values = sorted(phi_dict.keys())
+    n_harm   = len(m_values)
+    m_arr    = np.array(m_values, dtype=np.int32)
+
+    phi0_tab = phi_dict[0]   # (nR, nz) m=0 amplitudes — needed for normalisation
+
+    all_nodes = []
+    for m in m_values:
+        fval = phi_dict[m]   # (nR, nz)
+
+        if log_scaling:
+            if m == 0:
+                fval_sc = np.log(-fval)                # log(-Phi_0)
+            else:
+                fval_sc = fval / phi0_tab              # Phi_m / Phi_0
+        else:
+            fval_sc = fval
+
+        nodes = _setup_cubic2d_nodes(lR_grid, lz_grid, fval_sc)   # (nR, nz, 4)
+        all_nodes.append(nodes)
+
+    node_arr = np.stack(all_nodes, axis=0)   # (n_harm, nR, nz, 4)
+
+    return dict(
+        Rscale      = float(Rscale),
+        lR_grid     = lR_grid.astype(np.float64),
+        lz_grid     = lz_grid.astype(np.float64),
+        node_arr    = node_arr.astype(np.float64),
+        m_arr       = m_arr,
+        n_harm      = n_harm,
+        mmax        = int(mmax),
+        log_scaling = int(log_scaling),
+        W_outer     = W_outer.astype(np.float64),
+        r0_outer    = float(r0_outer),
+        lmax_outer  = int(lmax_outer),
+        mmax_outer  = int(mmax_outer),
+    )
+
+
+# ---------------------------------------------------------------------------
+# CylSplinePotentialGPU
+# ---------------------------------------------------------------------------
+
+class CylSplinePotentialGPU(_GPUPotBase):
+    """
+    GPU evaluator for an Agama CylSpline potential.
+
+    Replicates Agama's CylSpline::evalCyl with 2D bicubic Hermite splines in
+    asinh-scaled coordinates (lR, lz), log-scaling of the m=0 term, and a
+    PowerLaw outer asymptotic (lmax=8 fit to grid boundary).
+
+    API matches ``agama.Potential``:
+        .potential(xyz, t=0.)   -> Phi
+        .force(xyz, t=0.)       -> −gradPhi
+        .density(xyz, t=0.)     -> rho  (computed via Laplacian of Hessian)
+        .forceDeriv(xyz, t=0.)  -> (force, deriv)
+        .evalDeriv(xyz, t=0.)   -> (phi, force, deriv)
+
+    Parameters
+    ----------
+    coefs : CylSplineCoefs
+        Parsed coefficient object (from ``read_cylspl_coefs``).
+    """
+
+    def __init__(self, coefs) -> None:
+        data = _build_cylspline_data(coefs)
+
+        nR = len(data["lR_grid"])
+        nz = len(data["lz_grid"])
+
+        self._d_lR_grid  = cp.asarray(data["lR_grid"])
+        self._d_lz_grid  = cp.asarray(data["lz_grid"])
+        self._d_node_arr = cp.asarray(data["node_arr"].ravel())
+        self._d_m_arr    = cp.asarray(data["m_arr"], dtype=cp.int32)
+        self._d_W_outer  = cp.asarray(data["W_outer"])
+
+        self._Rscale      = float(data["Rscale"])
+        self._nR          = nR
+        self._nz          = nz
+        self._n_harm      = int(data["n_harm"])
+        self._mmax        = int(data["mmax"])
+        self._log_scaling = int(data["log_scaling"])
+        self._r0_outer    = float(data["r0_outer"])
+        self._lmax_outer  = int(data["lmax_outer"])
+        self._mmax_outer  = int(data["mmax_outer"])
+        self._inv_4piG    = _INV_4PIG
+
+    # ---- constructors -------------------------------------------------------
+
+    @classmethod
+    def from_file(cls, path, **kw) -> "CylSplinePotentialGPU":
+        """Load from an Agama .coef_cylsp file."""
+        try:
+            from nbody_streams.agama_helper import read_coefs as _rc
+        except ImportError:
+            from _coefs import read_coefs as _rc
+        return cls(_rc(str(path)), **kw)
+
+    # ---- kernel launch helpers ----------------------------------------------
+
+    def _common_args(self):
+        return (
+            self._Rscale,
+            self._d_lR_grid, self._nR,
+            self._d_lz_grid, self._nz,
+            self._d_node_arr,
+            self._n_harm,
+            self._d_m_arr,
+            self._mmax,
+            self._log_scaling,
+            self._d_W_outer, self._r0_outer,
+            self._lmax_outer, self._mmax_outer,
+        )
+
+    def _unpack_xyz(self, xyz):
+        arr, was_single = _prep_xyz(xyz)
+        N   = arr.shape[0]
+        d_x = cp.ascontiguousarray(arr[:, 0])
+        d_y = cp.ascontiguousarray(arr[:, 1])
+        d_z = cp.ascontiguousarray(arr[:, 2])
+        return d_x, d_y, d_z, N, was_single
+
+    def _launch_eval(self, d_x, d_y, d_z, N: int, do_grad: bool):
+        phi_out  = cp.empty(N,     dtype=cp.float64)
+        grad_out = cp.empty(3 * N, dtype=cp.float64) if do_grad \
+                   else cp.empty(0, dtype=cp.float64)
+
+        kname  = "cylspl_force_kernel" if do_grad else "cylspl_potential_kernel"
+        blocks = (N + _THREADS_PER_BLOCK - 1) // _THREADS_PER_BLOCK
+        if do_grad:
+            _get_cylspl_kernel(kname)(
+                (blocks,), (_THREADS_PER_BLOCK,),
+                (d_x, d_y, d_z) + self._common_args() + (phi_out, grad_out, N),
+            )
+        else:
+            _get_cylspl_kernel(kname)(
+                (blocks,), (_THREADS_PER_BLOCK,),
+                (d_x, d_y, d_z) + self._common_args() + (phi_out, N),
+            )
+        return phi_out, (grad_out if do_grad else None)
+
+    def _launch_hess(self, d_x, d_y, d_z, N: int):
+        phi_out  = cp.empty(N,     dtype=cp.float64)
+        grad_out = cp.empty(3 * N, dtype=cp.float64)
+        hess_out = cp.empty(6 * N, dtype=cp.float64)
+
+        blocks = (N + _THREADS_PER_BLOCK - 1) // _THREADS_PER_BLOCK
+        _get_cylspl_kernel("cylspl_hess_kernel")(
+            (blocks,), (_THREADS_PER_BLOCK,),
+            (d_x, d_y, d_z) + self._common_args() + (phi_out, grad_out, hess_out, N),
+        )
+        return phi_out, grad_out, hess_out
+
+    # ---- public Agama-compatible API ----------------------------------------
+
+    def potential(self, xyz, t: float = 0.0) -> cp.ndarray:
+        d_x, d_y, d_z, N, single = self._unpack_xyz(xyz)
+        phi, _ = self._launch_eval(d_x, d_y, d_z, N, do_grad=False)
+        return phi[0] if single else phi
+
+    def force(self, xyz, t: float = 0.0) -> cp.ndarray:
+        d_x, d_y, d_z, N, single = self._unpack_xyz(xyz)
+        _, grad = self._launch_eval(d_x, d_y, d_z, N, do_grad=True)
+        force = -grad.reshape(N, 3)
+        return force[0] if single else force
+
+    def density(self, xyz, t: float = 0.0) -> cp.ndarray:
+        """Evaluate rho via Laplacian: rho = -(Hxx+Hyy+Hzz)/(4πG)."""
+        d_x, d_y, d_z, N, single = self._unpack_xyz(xyz)
+        _, _, hess = self._launch_hess(d_x, d_y, d_z, N)
+        H = hess.reshape(N, 6)
+        rho = -(H[:, 0] + H[:, 1] + H[:, 2]) * self._inv_4piG
+        return rho[0] if single else rho
+
+    def forceDeriv(self, xyz, t: float = 0.0) -> Tuple[cp.ndarray, cp.ndarray]:
+        d_x, d_y, d_z, N, single = self._unpack_xyz(xyz)
+        _, grad_raw, hess_raw = self._launch_hess(d_x, d_y, d_z, N)
+        force = -grad_raw.reshape(N, 3)
+        deriv = -hess_raw.reshape(N, 6)
+        if single:
+            return force[0], deriv[0]
+        return force, deriv
+
+    def evalDeriv(self, xyz, t: float = 0.0) -> Tuple[cp.ndarray, cp.ndarray, cp.ndarray]:
+        d_x, d_y, d_z, N, single = self._unpack_xyz(xyz)
+        phi_raw, grad_raw, hess_raw = self._launch_hess(d_x, d_y, d_z, N)
+        force = -grad_raw.reshape(N, 3)
+        deriv = -hess_raw.reshape(N, 6)
+        if single:
+            return phi_raw[0], force[0], deriv[0]
+        return phi_raw, force, deriv
+
+    def eval(self, xyz, pot: bool = False, acc: bool = False,
+             der: bool = False, t: float = 0.0):
         if not (pot or acc or der):
             raise ValueError("eval(): at least one of pot, acc, der must be True.")
         if der:
@@ -1692,6 +2206,28 @@ def _load_potential_ini(p: Path):
             built.append(MultipolePotentialGPU.from_file(coef_path))
             continue
 
+        # ---- CylSpline: inline Coefficients or file= reference ----
+        if type_ == 'cylspline':
+            if data_kind == 'coef':
+                section_text = '\n'.join(section_lines)
+                try:
+                    from nbody_streams.agama_helper import read_coefs as _rc
+                except ImportError:
+                    from _coefs import read_coefs as _rc
+                built.append(CylSplinePotentialGPU(_rc(section_text)))
+            else:
+                coef_file = str(params.get('file') or params.get('File', ''))
+                if not coef_file:
+                    raise ValueError(
+                        f"CylSpline section in {p} has neither inline Coefficients "
+                        "nor a 'file' key."
+                    )
+                coef_path = Path(coef_file)
+                if not coef_path.is_absolute():
+                    coef_path = base / coef_path
+                built.append(CylSplinePotentialGPU.from_file(coef_path))
+            continue
+
         # ---- Evolving: parse Timestamps block ----
         if type_ == 'evolving':
             if data_kind != 'ts':
@@ -1749,10 +2285,7 @@ def _build_single(source, pot_kw: dict):
         return MultipolePotentialGPU(source, **pot_kw)
 
     if CylSplineCoefs is not None and isinstance(source, CylSplineCoefs):
-        raise NotImplementedError(
-            "CylSplinePotentialGPU is not yet implemented (Phase 3). "
-            "Evaluate CylSpline on CPU via agama.Potential for now."
-        )
+        return CylSplinePotentialGPU(source, **pot_kw)
 
     # dict — e.g. dict(type='Disk', surfaceDensity=...) — Agama-style component spec
     if isinstance(source, dict):
@@ -1769,7 +2302,7 @@ def _build_single(source, pot_kw: dict):
 
     if isinstance(source, (str, Path)):
         p = Path(source)
-        # Check for Agama-style multi-section INI potential file
+        # Check for Agama-style coefficient/INI file (starts with [Potential])
         if _is_potential_ini(p):
             return _load_potential_ini(p)
         return MultipolePotentialGPU.from_file(source, **pot_kw)
