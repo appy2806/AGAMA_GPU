@@ -3,7 +3,7 @@
 //  GPU kernels for evaluating Agama Multipole BFE potentials.
 //
 //  Phase 1 optimizations over baseline potential_kernels.cu:
-//    - __ldg() on poly reads  → 128-byte read-only (texture) cache path
+//    - __ldg() on poly reads  -> 128-byte read-only (texture) cache path
 //    - fma() throughout Horner evaluation in quintic_eval
 //    - Shared memory for lm_l[], lm_m[] arrays (loaded cooperatively per block)
 //    - Designed to pair with Python-side radius sorting for L1 cache reuse
@@ -30,7 +30,7 @@
 //
 //  Hessian output layout (matches agama.Potential.forceDeriv):
 //    hess_out per particle: [Hxx, Hyy, Hzz, Hxy, Hyz, Hxz]
-//    → force derivatives = -hess = [dFx/dx, dFy/dy, dFz/dz, dFx/dy, dFy/dz, dFz/dx]
+//    -> force derivatives = -hess = [dFx/dx, dFy/dy, dFz/dz, dFx/dy, dFy/dz, dFz/dx]
 //
 //  Performance notes:
 //    - On-the-fly NORM_LM: pfact_cur recurrence, one sqrt() per (absm,l) pair
@@ -105,7 +105,7 @@ quintic_eval(const double* __restrict__ poly,
     // __ldg: route through 128-byte read-only (texture) cache.
     // After radius sorting, consecutive threads in a warp land in the same
     // radial interval k, so all 6 doubles for a given (c,k) entry are shared
-    // across the warp → high L1 hit rate.
+    // across the warp -> high L1 hit rate.
     int base = (c * n_intervals + k) * 6;
     double a0=__ldg(poly+base  ), a1=__ldg(poly+base+1), a2=__ldg(poly+base+2);
     double a3=__ldg(poly+base+3), a4=__ldg(poly+base+4), a5=__ldg(poly+base+5);
@@ -178,12 +178,12 @@ multipole_eval_device(
         double dlr = logr - logr_min;  // negative
         double r_ratio_s = (inner_s != 0.0) ? exp(inner_s * dlr) : 1.0;
         double Phi0 = inner_U * r_ratio_s + inner_W;
-        phi_out[tid] = MUL0 * Phi0 * PREFACT[0];  // l=0 only (higher l vanish as r^l → 0)
+        phi_out[tid] = MUL0 * Phi0 * PREFACT[0];  // l=0 only (higher l vanish as r^l -> 0)
         if (DO_GRAD) {
             // dPhi/d(logr) = U * s * (r/r0)^s
             double dPhi0_dlr = inner_U * inner_s * r_ratio_s;
             double inv_r2 = 1.0 / r2;
-            // gradient = dPhi/dlogr * (x/r²) for each component
+            // gradient = dPhi/dlogr * (x/r^2) for each component
             double g = MUL0 * dPhi0_dlr * PREFACT[0];
             grad_out[3*tid+0] = g * (px * inv_r2);
             grad_out[3*tid+1] = g * (py * inv_r2);
@@ -301,7 +301,7 @@ multipole_eval_device(
             der_cur = der_prev*cos_theta*(double)(2*absm+1)
                     - raw_prev*sin_theta*(double)(2*absm+1);
 
-        // Helper macro: accumulate one active term at (l_val, m_val=±absm, ci_idx)
+        // Helper macro: accumulate one active term at (l_val, m_val=+-absm, ci_idx)
         // Uses raw_lm = raw_cur (l > absm) or raw_prev (l == absm).
         // pfact_cur = NORM_LM[l_val*(l_val+1)+absm] (maintained by caller).
         // cm/sm = cos(absm*phi) / sin(absm*phi) (rolling state, outer scope).
@@ -359,7 +359,7 @@ multipole_eval_device(
                 raw_prev = raw_cur; der_prev = der_cur;
                 raw_cur  = nr;      der_cur  = nd;
             }
-            // pfact_cur advances from PREFACT[absm] → NORM_LM[l*(l+1)+absm]
+            // pfact_cur advances from PREFACT[absm] -> NORM_LM[l*(l+1)+absm]
             pfact_cur *= sqrt((2.0*l+1)/(2.0*l-1) * (double)(l-absm)/(double)(l+absm));
             if (ci >= n_lm) break;
             if (lm_l[ci] != l) {
@@ -460,7 +460,7 @@ multipole_force_kernel(
 //
 //  Output layout matches agama.Potential.forceDeriv:
 //    hess_out[6*i + {0..5}] = [Hxx, Hyy, Hzz, Hxy, Hyz, Hxz]
-//  → force derivatives = −H = [dFx/dx, dFy/dy, dFz/dz, dFx/dy, dFy/dz, dFz/dx]
+//  -> force derivatives = −H = [dFx/dx, dFy/dy, dFz/dz, dFx/dy, dFy/dz, dFz/dx]
 // ---------------------------------------------------------------------------
 
 extern "C" __global__ __launch_bounds__(256, 2) void
@@ -598,7 +598,7 @@ multipole_hess_kernel(
     // Replaces Plm_arr/dPlm_arr/d2Plm_arr[289] with ~12 registers per m-group.
     //   raw_cur/prev  = P_l^|m| / PREFACT[|m|]   (un-normalized)
     //   der_cur/prev  = d(P_l^|m|)/dθ / PREFACT[|m|]
-    //   d2Ylm via Legendre ODE: d2P/dθ² = -cot·dP/dθ - [l(l+1) - m²/sin²]·P
+    //   d2Ylm via Legendre ODE: d2P/dθ^2 = -cot·dP/dθ - [l(l+1) - m^2/sin^2]·P
     // -----------------------------------------------------------------------
     const bool near_pole = (sin_theta < 1.0e-10);
 
@@ -660,7 +660,7 @@ multipole_hess_kernel(
         if      (absm == 0) raw_prev = 1.0;
         else if (absm == 1) raw_prev = -sin_theta;
         else                raw_prev = (pf != 0.0) ? COEF[absm]*sin_pow/pf : 0.0;
-        // d(raw_prev)/dθ: P_m^m = C_m*sin^m → dP_m^m/dθ = m*cot(θ)*P_m^m
+        // d(raw_prev)/dθ: P_m^m = C_m*sin^m -> dP_m^m/dθ = m*cot(θ)*P_m^m
         double der_prev;
         if      (absm == 0) der_prev = 0.0;
         else if (absm == 1) der_prev = -cos_theta;
@@ -726,7 +726,7 @@ multipole_hess_kernel(
     grad_out[3*tid+2]=dPhi_dlr*dlr_dz+dPhi_dth*dth_dz;
 
     // Cartesian Hessian — full chain rule
-    // (uses standard inv_R formulation; at exact pole, phi-dependent terms → 0)
+    // (uses standard inv_R formulation; at exact pole, phi-dependent terms -> 0)
     double dph_dx=-sin_phi*inv_R, dph_dy=cos_phi*inv_R;
     double inv_r3=inv_r2*inv_r, inv_r4=inv_r2*inv_r2, inv_r5=inv_r4*inv_r;
     double inv_R2=inv_R*inv_R;
@@ -767,11 +767,11 @@ multipole_hess_kernel(
     double d2ph[6]={d2ph_xx,d2ph_xy,0.,d2ph_yy,0.,0.};
 
     // Agama forceDeriv layout: [Hxx, Hyy, Hzz, Hxy, Hyz, Hxz]
-    // Mapping: p=0→(i=0,j=0), p=1→(i=1,j=1), p=2→(i=2,j=2)
-    //          p=3→(i=0,j=1), p=4→(i=1,j=2), p=5→(i=0,j=2)
+    // Mapping: p=0->(i=0,j=0), p=1->(i=1,j=1), p=2->(i=2,j=2)
+    //          p=3->(i=0,j=1), p=4->(i=1,j=2), p=5->(i=0,j=2)
     int ii[6]={0,1,2,0,1,0};
     int jj[6]={0,1,2,1,2,2};
-    // d2lr/d2th/d2ph indexed by canonical {xx,xy,xz,yy,yz,zz} order → map ii,jj:
+    // d2lr/d2th/d2ph indexed by canonical {xx,xy,xz,yy,yz,zz} order -> map ii,jj:
     // canonical slot for (i,j): 0=(0,0)=xx, 1=(0,1)=xy, 2=(0,2)=xz, 3=(1,1)=yy, 4=(1,2)=yz, 5=(2,2)=zz
     // For output p, need canonical slot of (ii[p], jj[p]):
     int can[6];
@@ -848,7 +848,7 @@ multipole_density_kernel(
 
     int k=(int)((logr-logr_min)*inv_dlogr);
     if (k<0) k=0;
-    if (k>=n_intervals) { rho_out[tid]=0.; return; }  // beyond grid: density→0 (Keplerian tail)
+    if (k>=n_intervals) { rho_out[tid]=0.; return; }  // beyond grid: density->0 (Keplerian tail)
     double s=(logr-(logr_min+k*dlogr))*inv_dlogr;
     if (s<0.) s=0.; if (s>1.) s=1.;
 
