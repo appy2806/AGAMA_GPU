@@ -265,6 +265,8 @@ def run_speedup_benchmark():
 
             print(f"    {N:>9,}  {t_cpu:>10.2f}  {t_base:>10.2f}  {t_opt:>10.2f}"
                   f"  {t_cpu/t_base:>9.1f}x  {t_cpu/t_opt:>9.1f}x  {t_base/t_opt:>9.1f}x")
+            del xyz_cp
+            cp.get_default_memory_pool().free_all_blocks()
 
     print("=" * W)
 
@@ -379,6 +381,8 @@ def run_precomputed_benchmark():
 
                 print(f"    {N:>9,}  {t_cpu:>10.2f}  {t_base:>10.2f}  {t_opt:>10.2f}"
                       f"  {t_cpu/t_base:>9.1f}x  {t_cpu/t_opt:>9.1f}x  {t_base/t_opt:>9.1f}x")
+                del xyz_cp
+                cp.get_default_memory_pool().free_all_blocks()
 
         print("=" * W)
 

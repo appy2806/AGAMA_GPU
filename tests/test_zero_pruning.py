@@ -142,6 +142,8 @@ def test_speedup():
 
             print(f"  {N:>9,}  {t_cpu:>9.2f}  {t_no:>12.2f}  {t_pr:>14.2f}"
                   f"  {t_cpu/t_no:>7.1f}x  {t_cpu/t_pr:>9.1f}x  {t_no/t_pr:>9.1f}x")
+            del xyz_cp
+            cp.get_default_memory_pool().free_all_blocks()
 
 
 if __name__ == "__main__":

@@ -106,6 +106,8 @@ for N in N_SIZES:
 
         speedup = cpu_ms / gpu_ms
         print(f"{N:>10,}  {t_eval:>6.1f}  {cpu_ms:>8.2f}  {gpu_ms:>8.2f}  {speedup:>7.1f}x")
+        del xyz_cp
+        cp.get_default_memory_pool().free_all_blocks()
 
 # ---------------------------------------------------------------------------
 # Accuracy check at t=9.0, N=10k

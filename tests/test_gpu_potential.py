@@ -184,6 +184,8 @@ def bench_timing(lmax, coef_file):
 
         speedup = t_cpu / t_gpu if t_gpu > 0 else float("inf")
         print(f"  {N:>10d}  {t_cpu:>14.3f}  {t_gpu:>14.3f}  {speedup:>8.1f}x")
+        del xyz_cp
+        cp.get_default_memory_pool().free_all_blocks()
 
 # ---------------------------------------------------------------------------
 # Main
