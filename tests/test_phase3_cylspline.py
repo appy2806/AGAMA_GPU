@@ -214,6 +214,9 @@ def test_speedup():
         speedup = t_cpu / t_gpu
         print(f"  {N:>10,}  {t_cpu*1e3:>12.2f}  {t_gpu*1e3:>12.2f}  {speedup:>10.1f}x")
 
+        del xyz_cp
+        cp.get_default_memory_pool().free_all_blocks()
+
     print("=" * W)
     print()
 

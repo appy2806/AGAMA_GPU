@@ -336,6 +336,13 @@ def run_comprehensive_benchmark():
             t_cpu = GPUTimer.benchmark(lambda: agama_pot.force(xyz_np), is_gpu=False)
             t_gpu = GPUTimer.benchmark(lambda: gpu_pot.force(xyz_cp),   is_gpu=True)
 
+            # Release pooled benchmark output arrays before next N step.
+            # Each benchmark call creates a new output array; without this the
+            # CuPy memory pool accumulates O(warmup+reps) × N × 24 bytes and
+            # can exhaust GPU memory on large N (e.g. N=10^7 on H-200).
+            del xyz_cp
+            cp.get_default_memory_pool().free_all_blocks()
+
             speedup    = t_cpu / t_gpu
             throughput = (N / t_gpu) / 1e6
             cpu_ms     = t_cpu * 1000
