@@ -158,8 +158,11 @@ def test_mmax_sweep():
     W = 72
     print()
     print("=" * W)
-    print(f"{'PHASE 3 mmax SWEEP:  CylSplineGPU  vs  CPU full (mmax=8)':^{W}}")
+    print(f"{'PHASE 3 mmax SWEEP:  GPU(mmax=k) vs CPU(mmax=8 full)':^{W}}")
     print("=" * W)
+    print(f"  Note: errors here are the *harmonic contribution*, not GPU inaccuracy.")
+    print(f"  At mmax=8 (bottom row) the error is pure GPU numerical error.")
+    print("-" * W)
     print(f"  {'mmax':<6}  {'Phi err':>12}  {'Force err':>12}  {'n_harm':>8}")
     print("-" * W)
 

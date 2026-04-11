@@ -132,7 +132,10 @@ def _get_cylspl_module() -> cp.RawModule:
         _CYLSPL_MODULE = cp.RawModule(
             code=_CYLSPL_KERNEL_FILE.read_text(),
             backend="nvcc",
-            options=("--use_fast_math", "-std=c++14"),
+            # No --use_fast_math: the CylSpline kernel relies on exp, log, asinh,
+            # atan2, sin, cos — fast-math routes these through hardware intrinsics
+            # on Hopper (sm_90) that produce NaN for certain inputs.
+            options=("-std=c++14",),
         )
     return _CYLSPL_MODULE
 
