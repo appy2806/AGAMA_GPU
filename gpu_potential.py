@@ -720,14 +720,30 @@ class MultipolePotentialGPU(_GPUPotBase):
     # ---- kernel launch helpers ----------------------------------------------
 
     def _common_args(self):
-        """Scalar args common to all kernels."""
+        """Scalar args common to all kernels.
+
+        All int/double scalars are explicitly typed (np.int32 / np.float64).
+        Without this, CuPy wraps Python int as np.intp (int64) and Python float
+        as np.float64.  np.float64 is fine; but np.intp (8 bytes) for a kernel
+        `int` (4 bytes) parameter causes the CUDA driver to read the wrong bytes
+        on sm_90 / Hopper, corrupting every subsequent kernel argument.
+        """
         return (self._d_poly,
-                self._logr_min, self._dlogr, self._inv_dlogr,
-                self._n_intervals, self._n_lm, self._lmax,
+                np.float64(self._logr_min),
+                np.float64(self._dlogr),
+                np.float64(self._inv_dlogr),
+                np.int32(self._n_intervals),
+                np.int32(self._n_lm),
+                np.int32(self._lmax),
                 self._d_lm_l, self._d_lm_m,
-                self._log_scaling, self._invPhi0,
-                self._inner_s, self._inner_U, self._inner_W,
-                self._outer_s, self._outer_U, self._outer_W)
+                np.int32(self._log_scaling),
+                np.float64(self._invPhi0),
+                np.float64(self._inner_s),
+                np.float64(self._inner_U),
+                np.float64(self._inner_W),
+                np.float64(self._outer_s),
+                np.float64(self._outer_U),
+                np.float64(self._outer_W))
 
     def _launch_eval(self, d_x, d_y, d_z, N: int, do_grad: bool):
         """Run potential-only or potential+gradient kernel."""
@@ -739,7 +755,7 @@ class MultipolePotentialGPU(_GPUPotBase):
         blocks = (N + _THREADS_PER_BLOCK - 1) // _THREADS_PER_BLOCK
         _get_kernel(kname)(
             (blocks,), (_THREADS_PER_BLOCK,),
-            (d_x, d_y, d_z) + self._common_args() + (phi_out, grad_out, N),
+            (d_x, d_y, d_z) + self._common_args() + (phi_out, grad_out, np.int32(N)),
         )
         return phi_out, (grad_out if do_grad else None)
 
@@ -752,7 +768,7 @@ class MultipolePotentialGPU(_GPUPotBase):
         blocks = (N + _THREADS_PER_BLOCK - 1) // _THREADS_PER_BLOCK
         _get_kernel("multipole_hess_kernel")(
             (blocks,), (_THREADS_PER_BLOCK,),
-            (d_x, d_y, d_z) + self._common_args() + (phi_out, grad_out, hess_out, N),
+            (d_x, d_y, d_z) + self._common_args() + (phi_out, grad_out, hess_out, np.int32(N)),
         )
         return phi_out, grad_out, hess_out
 
@@ -763,7 +779,7 @@ class MultipolePotentialGPU(_GPUPotBase):
         blocks = (N + _THREADS_PER_BLOCK - 1) // _THREADS_PER_BLOCK
         _get_kernel("multipole_density_kernel")(
             (blocks,), (_THREADS_PER_BLOCK,),
-            (d_x, d_y, d_z) + self._common_args() + (self._inv_4piG, rho_out, N),
+            (d_x, d_y, d_z) + self._common_args() + (np.float64(self._inv_4piG), rho_out, np.int32(N)),
         )
         return rho_out
 
@@ -1290,17 +1306,23 @@ class CylSplinePotentialGPU(_GPUPotBase):
     # ---- kernel launch helpers ----------------------------------------------
 
     def _common_args(self):
+        # Scalars must be explicitly typed: CuPy wraps Python int as np.intp
+        # (int64) but the kernel declares them as int (int32).  On sm_90 /
+        # Hopper the CUDA driver reads the wrong bytes, corrupting base-index
+        # calculations (base = mm * nR * nz) and producing garbage / inf output.
+        # Explicit np.int32 / np.float64 casts guarantee the correct 4/8-byte
+        # values regardless of CuPy or driver version.
         return (
-            self._Rscale,
-            self._d_lR_grid, self._nR,
-            self._d_lz_grid, self._nz,
+            np.float64(self._Rscale),
+            self._d_lR_grid, np.int32(self._nR),
+            self._d_lz_grid, np.int32(self._nz),
             self._d_node_arr,
-            self._n_harm,
+            np.int32(self._n_harm),
             self._d_m_arr,
-            self._mmax,
-            self._log_scaling,
-            self._d_W_outer, self._r0_outer,
-            self._lmax_outer, self._mmax_outer,
+            np.int32(self._mmax),
+            np.int32(self._log_scaling),
+            self._d_W_outer, np.float64(self._r0_outer),
+            np.int32(self._lmax_outer), np.int32(self._mmax_outer),
         )
 
     def _unpack_xyz(self, xyz):
@@ -1321,12 +1343,12 @@ class CylSplinePotentialGPU(_GPUPotBase):
         if do_grad:
             _get_cylspl_kernel(kname)(
                 (blocks,), (_THREADS_PER_BLOCK,),
-                (d_x, d_y, d_z) + self._common_args() + (phi_out, grad_out, N),
+                (d_x, d_y, d_z) + self._common_args() + (phi_out, grad_out, np.int32(N)),
             )
         else:
             _get_cylspl_kernel(kname)(
                 (blocks,), (_THREADS_PER_BLOCK,),
-                (d_x, d_y, d_z) + self._common_args() + (phi_out, N),
+                (d_x, d_y, d_z) + self._common_args() + (phi_out, np.int32(N)),
             )
         return phi_out, (grad_out if do_grad else None)
 
@@ -1338,7 +1360,7 @@ class CylSplinePotentialGPU(_GPUPotBase):
         blocks = (N + _THREADS_PER_BLOCK - 1) // _THREADS_PER_BLOCK
         _get_cylspl_kernel("cylspl_hess_kernel")(
             (blocks,), (_THREADS_PER_BLOCK,),
-            (d_x, d_y, d_z) + self._common_args() + (phi_out, grad_out, hess_out, N),
+            (d_x, d_y, d_z) + self._common_args() + (phi_out, grad_out, hess_out, np.int32(N)),
         )
         return phi_out, grad_out, hess_out
 
