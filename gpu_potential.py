@@ -132,7 +132,16 @@ def _get_cylspl_module() -> cp.RawModule:
         _CYLSPL_MODULE = cp.RawModule(
             code=_CYLSPL_KERNEL_FILE.read_text(),
             backend="nvcc",
-            options=("--use_fast_math", "-std=c++14"),
+            # -Xptxas -O0: disable PTX-level (ptxas) optimizations.
+            # Required on sm_90 (Hopper) with CUDA 12/13: the ptxas optimizer
+            # miscompiles the bicubic Hermite evaluation loop in this kernel,
+            # producing catastrophically wrong potential values for interior grid
+            # cells (while grid-node evaluations remain exact).  -G (full debug)
+            # and -Xptxas -O0 both suppress the bug; -Xptxas -O0 is cheaper
+            # because it only disables PTX assembly-time optimizations, not
+            # nvcc-level transformations.  Performance impact is small because
+            # the kernel is memory-bandwidth bound.
+            options=("--use_fast_math", "-std=c++14", "-Xptxas", "-O0"),
         )
     return _CYLSPL_MODULE
 
