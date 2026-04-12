@@ -1,9 +1,9 @@
 """
 gpu_potential.py
 ~~~~~~~~~~~~~~~~
-GPU-accelerated evaluation of Agama BFE (Multipole) potentials using CuPy.
+GPU-accelerated evaluation of Agama potentials using CuPy.
 
-Kernels live in ``potential_kernels.cu`` compiled once via ``cp.RawModule``
+Kernels live in ``_*_kernel.cu`` compiled once via ``cp.RawModule``
 with nvcc and ``--use_fast_math``.
 
 API mirrors agama.Potential:
