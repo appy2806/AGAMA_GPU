@@ -8,7 +8,7 @@ with nvcc and ``--use_fast_math``.
 
 API mirrors agama.Potential:
     .potential(xyz, t=0.)   -> (N,)      [km/s]^2
-    .force(xyz, t=0.)       -> (N,3)     [km/s]^2/kpc    (= −gradPhi)
+    .force(xyz, t=0.)       -> (N,3)     [km/s]^2/kpc    (= -gradPhi)
     .density(xyz, t=0.)    -> (N,)      [Msol/kpc^3]
     .forceDeriv(xyz, t=0.)  -> (force(N,3), deriv(N,6))
                                deriv[i] = [dFx/dx, dFy/dy, dFz/dz, dFx/dy, dFy/dz, dFz/dx]
@@ -17,7 +17,7 @@ API mirrors agama.Potential:
 
 All methods accept:
     - CuPy or NumPy arrays
-    - Shape (3,) for a single point  → output shape is squeezed accordingly
+    - Shape (3,) for a single point  -> output shape is squeezed accordingly
     - Shape (N,3) for N points
 
 Units (Agama convention): mass=Msol, length=kpc, velocity=km/s
@@ -25,11 +25,11 @@ Units (Agama convention): mass=Msol, length=kpc, velocity=km/s
 
 Spline accuracy: Agama-compatible quintic splines with log-scaling of the
 radial coefficients (replicates MultipoleInterp1d from potential_multipole.cpp).
-Requires dPhi/dr data — use _DR coefficient files.
+Requires dPhi/dr data : use _DR coefficient files.
 
 Requirements:
     CuPy >= 10.0,  nvcc accessible,  CUDA GPU
-    scipy (for quintic spline construction and Lambert W — falls back to
+    scipy (for quintic spline construction and Lambert W : falls back to
     invPhi0=0 if unavailable, still quintic but without inner asymptote scaling)
 """
 
@@ -72,23 +72,23 @@ _CYLSPL_MODULE: cp.RawModule | None = None
 # Radius-sort threshold.
 # On modern GPUs (L40/A100 with 96 MB L2 cache), the poly array for any
 # realistic lmax fits entirely in L2 without sorting.  argsort+scatter adds
-# ~0.15 ms at N=100k and ~0.76 ms at N=1M — pure overhead with no cache benefit.
+# ~0.15 ms at N=100k and ~0.76 ms at N=1M : pure overhead with no cache benefit.
 # Sorting would only help if poly_size > GPU L2, which requires lmax > ~50 or
 # a grid with >100k nodes.  Set to a very large value to disable effectively.
 _SORT_THRESHOLD = 999_999_999
 
 
 # ---------------------------------------------------------------------------
-# Mixin — shared by all GPU potential classes
+# Mixin : shared by all GPU potential classes
 # ---------------------------------------------------------------------------
 
 class _GPUPotBase:
     """
     Mixin giving every GPU potential class ``+`` composition and ``sum()`` support.
 
-    ``pot_a + pot_b``  →  ``CompositePotentialGPU([pot_a, pot_b])``
-    ``pot_a + composite``  →  flattened composite (avoids nesting)
-    ``sum([pot_a, pot_b, pot_c])``  →  works via ``__radd__(0)``
+    ``pot_a + pot_b``  ->  ``CompositePotentialGPU([pot_a, pot_b])``
+    ``pot_a + composite``  ->  flattened composite (avoids nesting)
+    ``sum([pot_a, pot_b, pot_c])``  ->  works via ``__radd__(0)``
     """
     def __add__(self, other):
         from_self  = self._components  if isinstance(self,  CompositePotentialGPU) else [self]
@@ -154,8 +154,8 @@ def _get_cylspl_kernel(name: str) -> cp.RawKernel:
 # Physical constants (Agama units: Msol, kpc, km/s)
 # ---------------------------------------------------------------------------
 
-_G_AGAMA  = 4.30091727067736e-06                  # kpc (km/s)² Msol⁻¹
-_INV_4PIG = 1.0 / (4.0 * math.pi * _G_AGAMA)      # Msol kpc⁻¹ (km/s)⁻²
+_G_AGAMA  = 4.30091727067736e-06                  # kpc (km/s)^2 Msol^-1
+_INV_4PIG = 1.0 / (4.0 * math.pi * _G_AGAMA)      # Msol kpc^-1 (km/s)^-2
 
 _THREADS_PER_BLOCK = 256
 
@@ -231,7 +231,7 @@ def _compute_invPhi0(phi_l0: np.ndarray,
     if not np.isfinite(s):
         s = 2.0  # constant-density-core fallback
 
-    # Compute U, W — matches C++ lines 543-548 (no early return for s<=0)
+    # Compute U, W : matches C++ lines 543-548 (no early return for s<=0)
     v = 0  # l=0 inner extrapolation
     if s != v:
         U = (r1 * dPhi1 - v * Phi1) / (s - v)
@@ -241,7 +241,7 @@ def _compute_invPhi0(phi_l0: np.ndarray,
         W = Phi1
 
     # v=0 special: compare power-law vs cubic-polynomial prediction for dPhi2
-    # (C++ lines 550-561 — always runs, may override s to 2)
+    # (C++ lines 550-561 : always runs, may override s to 2)
     dPhi2a = U * s * np.exp(s * lnr) / r2 if s != 0 else r1 * dPhi1 / r2
     dPhi2b = (r2 / r1 * (6.0*r1*(Phi2-Phi1)/(r2-r1) - dPhi1*(2*r1+r2))) / (2*r2+r1)
     if abs(dPhi2 - dPhi2b) < abs(dPhi2 - dPhi2a):
@@ -273,7 +273,7 @@ def _compute_outer_extrap(phi_l0: np.ndarray,
     Replicates ``computeExtrapolationCoefs(v=-1, outer)`` from
     ``potential_multipole.cpp``.  The W term is the Keplerian -GM/r component
     (zero Laplacian); U*(r/r_N)^s is the residual whose density contribution
-    is U*s*(s+1)*(r/r_N)^s / r^2 / (4πG).
+    is U*s*(s+1)*(r/r_N)^s / r^2 / (4piG).
 
     Returns
     -------
@@ -391,8 +391,8 @@ def _solve_quintic_d2(logr: np.ndarray,
     #   ab[0, j] = A[j-1, j]  (superdiag)
     #   ab[1, j] = A[j, j]    (diagonal)
     #   ab[2, j] = A[j+1, j]  (subdiag)
-    # sup[i] = A[i, i+1] → ab[0, i+1] = sup[i]
-    # sub[i] = A[i, i-1] → ab[2, i-1] = sub[i]
+    # sup[i] = A[i, i+1] -> ab[0, i+1] = sup[i]
+    # sub[i] = A[i, i-1] -> ab[2, i-1] = sub[i]
     ab = np.zeros((3, n))
     ab[0, 1:]   = sup[:n-1]
     ab[1, :]    = diag
@@ -402,7 +402,7 @@ def _solve_quintic_d2(logr: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
-# CPU preprocessing: MultipoleCoefs → GPU-ready arrays
+# CPU preprocessing: MultipoleCoefs -> GPU-ready arrays
 # ---------------------------------------------------------------------------
 
 def _build_multipole_data(coefs, prune_threshold: float = 1e-16) -> dict:
@@ -413,14 +413,14 @@ def _build_multipole_data(coefs, prune_threshold: float = 1e-16) -> dict:
     Spline representation (Agama-compatible)
     ----------------------------------------
     Agama applies a log-scaling before fitting the quintic:
-      • l=0 term: Phi_scaled  = log(invPhi0 - 1/Phi_0)
-      • l>0 terms: Phi_scaled = Phi_c / Phi_0
+      - l=0 term: Phi_scaled  = log(invPhi0 - 1/Phi_0)
+      - l>0 terms: Phi_scaled = Phi_c / Phi_0
 
     The quintic C2 spline is fit on these scaled values; second derivatives
     are determined by the tridiagonal system (constructQuinticSpline).
 
     Polynomial layout per interval:
-        C(s) = a0 + s*(a1 + s*(a2 + s*(a3 + s*(a4 + s*a5))))   s ∈ [0,1]
+        C(s) = a0 + s*(a1 + s*(a2 + s*(a3 + s*(a4 + s*a5))))   s in [0,1]
     with boundary conditions C(0)=f0, C'(0)=m0, C''(0)=q0,
                               C(1)=f1, C'(1)=m1, C''(1)=q1
 
@@ -521,9 +521,9 @@ def _build_multipole_data(coefs, prune_threshold: float = 1e-16) -> dict:
 
     # ------------------------------------------------------------------
     # Zero-coefficient pruning: drop (l,m) columns where all phi values
-    # are below threshold.  Column 0 (monopole) is always kept — Agama's
+    # are below threshold.  Column 0 (monopole) is always kept : Agama's
     # log-scaling and inner-boundary code depend on it.
-    # For axisymmetric potentials (type='Disk', lmax=32): 1089 → 17 terms.
+    # For axisymmetric potentials (type='Disk', lmax=32): 1089 -> 17 terms.
     # ------------------------------------------------------------------
     keep_mask = np.ones(n_lm, dtype=bool)
     if prune_threshold > 0:
@@ -563,7 +563,7 @@ def _build_multipole_data(coefs, prune_threshold: float = 1e-16) -> dict:
 
         # c>0: Phi_scaled = Phi_c / Phi_0,  dPhi_scaled = (dPhi_c - ratio*dPhi_0)/Phi_0
         phi0               = phi_l0[:, np.newaxis]           # (nR, 1)
-        dphi0_dlr          = dphi_dlogr[:, 0:1]              # (nR, 1) — actual dPhi_0/d(logr)
+        dphi0_dlr          = dphi_dlogr[:, 0:1]              # (nR, 1) : actual dPhi_0/d(logr)
         ratio              = phi[:, 1:] / phi0               # (nR, n_lm-1)
         phi_sc[:, 1:]       = ratio
         dphi_dlogr_sc[:, 1:] = (dphi_dlogr[:, 1:] - ratio * dphi0_dlr) / phi0
@@ -577,9 +577,9 @@ def _build_multipole_data(coefs, prune_threshold: float = 1e-16) -> dict:
     # Build 6-coefficient Horner polynomials per (lm, interval)
     #   C(s) = a0 + s*(a1 + s*(a2 + s*(a3 + s*(a4 + s*a5))))
     # Boundary conditions:
-    #   C(0)=f0, C'(0)=m0≡dC/ds|0, C''(0)=q0≡d2C/ds^2|0
+    #   C(0)=f0, C'(0)=m0 (=dC/ds|0), C''(0)=q0 (=d2C/ds^2|0)
     #   C(1)=f1, C'(1)=m1,           C''(1)=q1
-    # where  m = dphi_dlogr_scaled * h,  q = d2phi_sc * h²
+    # where  m = dphi_dlogr_scaled * h,  q = d2phi_sc * h^2
     # ------------------------------------------------------------------
     h  = dlogr
     ni = n_intervals
@@ -639,7 +639,7 @@ class MultipolePotentialGPU(_GPUPotBase):
 
     API matches ``agama.Potential``:
         .potential(xyz, t=0.)   -> Phi
-        .force(xyz, t=0.)       -> −gradPhi
+        .force(xyz, t=0.)       -> -gradPhi
         .density(xyz, t=0.)     -> rho = div(grad(Phi)) / (4piG)
         .forceDeriv(xyz, t=0.)  -> (force, deriv)
               deriv layout: [dFx/dx, dFy/dy, dFz/dz, dFx/dy, dFy/dz, dFz/dx]
@@ -693,7 +693,7 @@ class MultipolePotentialGPU(_GPUPotBase):
         Works for potentials that Agama stores internally as Multipole
         expansions - e.g. ``Multipole``, ``King``, ``Spheroid``.
 
-        Analytic types (NFW, Plummer, Dehnen, …) do NOT export their
+        Analytic types (NFW, Plummer, Dehnen, ...) do NOT export their
         parameters (Agama writes only ``type=NFW  # other params not stored``).
         For those, construct the GPU class directly::
 
@@ -714,10 +714,10 @@ class MultipolePotentialGPU(_GPUPotBase):
             if "Coefficients" not in _head:
                 raise ValueError(
                     "from_agama(): the potential does not export expansion coefficients.\n"
-                    "Agama analytic types (NFW, Plummer, Dehnen, …) do not store their\n"
+                    "Agama analytic types (NFW, Plummer, Dehnen, ...) do not store their\n"
                     "parameters on export.  Construct the GPU class directly instead:\n"
                     "  NFWPotentialGPU(mass=..., scaleRadius=...)\n"
-                    "For King/Spheroid, Agama materialises them as Multipole — those work."
+                    "For King/Spheroid, Agama materialises them as Multipole : those work."
                 )
             return cls.from_file(tmp_path, **kw)
         finally:
@@ -796,7 +796,7 @@ class MultipolePotentialGPU(_GPUPotBase):
         """Return (d_x, d_y, d_z, N, was_single, sort_idx_or_None).
 
         When N >= _SORT_THRESHOLD, particles are sorted by radius so that threads
-        in the same warp land in the same radial interval → L1/L2 cache reuse on
+        in the same warp land in the same radial interval -> L1/L2 cache reuse on
         the poly coefficient array.  The caller must call _desort() on outputs.
         """
         arr, was_single = _prep_xyz(xyz)
@@ -804,7 +804,7 @@ class MultipolePotentialGPU(_GPUPotBase):
 
         if N >= _SORT_THRESHOLD:
             r2   = arr[:, 0]**2 + arr[:, 1]**2 + arr[:, 2]**2
-            sidx = cp.argsort(r2)        # sort ascending by r²
+            sidx = cp.argsort(r2)        # sort ascending by r^2
             arr  = arr[sidx]             # reordered (N,3)
         else:
             sidx = None
@@ -832,7 +832,7 @@ class MultipolePotentialGPU(_GPUPotBase):
         return phi[0] if single else phi
 
     def force(self, xyz, t: float = 0.0) -> cp.ndarray:
-        """Evaluate F = −gradPhi.  Returns (3,) or (N,3) CuPy float64 in (km/s)^2/kpc."""
+        """Evaluate F = -gradPhi.  Returns (3,) or (N,3) CuPy float64 in (km/s)^2/kpc."""
         d_x, d_y, d_z, N, single, sidx = self._unpack_xyz(xyz)
         _, grad = self._launch_eval(d_x, d_y, d_z, N, do_grad=True)
         if sidx is not None:
@@ -841,7 +841,7 @@ class MultipolePotentialGPU(_GPUPotBase):
         return force[0] if single else force
 
     def density(self, xyz, t: float = 0.0) -> cp.ndarray:
-        """Evaluate rho = div(grad(Phi))/(4πG).  Returns (N,) or scalar CuPy float64 in Msol/kpc³."""
+        """Evaluate rho = div(grad(Phi))/(4piG).  Returns (N,) or scalar CuPy float64 in Msol/kpc^3."""
         d_x, d_y, d_z, N, single, sidx = self._unpack_xyz(xyz)
         rho = self._launch_density(d_x, d_y, d_z, N)
         if sidx is not None:
@@ -855,10 +855,10 @@ class MultipolePotentialGPU(_GPUPotBase):
         Returns
         -------
         force : (3,) or (N,3) CuPy float64
-            F = −gradPhi in (km/s)^2/kpc
+            F = -gradPhi in (km/s)^2/kpc
         deriv : (6,) or (N,6) CuPy float64
             [dFx/dx, dFy/dy, dFz/dz, dFx/dy, dFy/dz, dFz/dx]
-            = −[Hxx, Hyy, Hzz, Hxy, Hyz, Hxz]
+            = -[Hxx, Hyy, Hzz, Hxy, Hyz, Hxz]
         """
         d_x, d_y, d_z, N, single, sidx = self._unpack_xyz(xyz)
         phi_raw, grad_raw, hess_raw = self._launch_hess(d_x, d_y, d_z, N)
@@ -881,9 +881,9 @@ class MultipolePotentialGPU(_GPUPotBase):
 
         Returns
         -------
-        phi   : (N,) or scalar — Phi in (km/s)^2
-        force : (N,3) or (3,) — F = −gradPhi
-        deriv : (N,6) or (6,) — force derivatives (see forceDeriv)
+        phi   : (N,) or scalar : Phi in (km/s)^2
+        force : (N,3) or (3,) : F = -gradPhi
+        deriv : (N,6) or (6,) : force derivatives (see forceDeriv)
         """
         d_x, d_y, d_z, N, single, sidx = self._unpack_xyz(xyz)
         phi_raw, grad_raw, hess_raw = self._launch_hess(d_x, d_y, d_z, N)
@@ -903,7 +903,7 @@ class MultipolePotentialGPU(_GPUPotBase):
     def eval(self, xyz, pot: bool = False, acc: bool = False,
              der: bool = False, t: float = 0.0):
         """
-        Agama-compatible eval — returns any combination of potential, acceleration,
+        Agama-compatible eval : returns any combination of potential, acceleration,
         and its derivatives.
 
         Matches ``agama.Potential.eval(xyz, pot=False, acc=False, der=False, t=0)``.
@@ -913,9 +913,9 @@ class MultipolePotentialGPU(_GPUPotBase):
 
         Parameters
         ----------
-        pot : bool   — include potential Phi
-        acc : bool   — include acceleration (= force = −gradPhi)
-        der : bool   — include force derivatives (−d2Phi/dx_i dx_j, shape (N,6))
+        pot : bool   : include potential Phi
+        acc : bool   : include acceleration (= force = -gradPhi)
+        der : bool   : include force derivatives (-d2Phi/dx_i dx_j, shape (N,6))
         """
         if not (pot or acc or der):
             raise ValueError("eval(): at least one of pot, acc, der must be True.")
@@ -939,7 +939,7 @@ class MultipolePotentialGPU(_GPUPotBase):
 # CylSpline preprocessing helpers
 # ---------------------------------------------------------------------------
 
-# Agama normalization constants — match _cylspl_potential_kernel.cu exactly
+# Agama normalization constants : match _cylspl_potential_kernel.cu exactly
 _CS_PREFACT = np.array([
     0.2820947917738782,   0.3454941494713355,   0.1287580673410632,
     0.02781492157551894,  0.004214597070904597, 0.0004911451888263050,
@@ -1012,7 +1012,7 @@ def _determine_asympt_cylspline(
     ----------
     R_grid   : (nR,) radial grid (original, before asinh scaling) [kpc]
     z_grid   : (nz,) z grid (full range or half-space) [kpc]
-    phi_dict : {m: (nR, nz) array} — Fourier amplitude tables (original, not log-scaled)
+    phi_dict : {m: (nR, nz) array} : Fourier amplitude tables (original, not log-scaled)
     mmax     : max azimuthal order present in the data
     lmax_fit : number of spherical harmonics to fit (Agama: LMAX_EXTRAPOLATION=8)
 
@@ -1111,7 +1111,7 @@ def _setup_cubic2d_nodes(lR: np.ndarray, lz: np.ndarray, fval: np.ndarray) -> np
 
     Returns
     -------
-    nodes : (nR, nz, 4) float64 — [fval, fx, fy, fxy] per node
+    nodes : (nR, nz, 4) float64 : [fval, fx, fy, fxy] per node
     """
     from scipy.interpolate import CubicSpline as _CS
 
@@ -1120,18 +1120,18 @@ def _setup_cubic2d_nodes(lR: np.ndarray, lz: np.ndarray, fval: np.ndarray) -> np
     fy  = np.zeros((nR, nz))
     fxy = np.zeros((nR, nz))
 
-    # Step 1: natural cubic spline in lz for each R-row → fy = df/dlz
+    # Step 1: natural cubic spline in lz for each R-row -> fy = df/dlz
     for i in range(nR):
         spl = _CS(lz, fval[i, :], bc_type='natural')
         fy[i, :] = spl(lz, 1)
 
-    # Step 2: clamped-left cubic spline in lR for each z-column → fx = df/dlR
+    # Step 2: clamped-left cubic spline in lR for each z-column -> fx = df/dlR
     # bc_type=((1, 0.0), 'natural'): f'=0 at lR[0], f''=0 at lR[-1]
     for j in range(nz):
         spl = _CS(lR, fval[:, j], bc_type=((1, 0.0), 'natural'))
         fx[:, j] = spl(lR, 1)
 
-    # Step 3: clamped-left cubic spline in lR for each z-column → fxy = d(fy)/dlR
+    # Step 3: clamped-left cubic spline in lR for each z-column -> fxy = d(fy)/dlR
     # Same BCs as step 2 (matches Agama's: isFinite(deriv_xmin)?0:NAN, NAN)
     for j in range(nz):
         spl = _CS(lR, fy[:, j], bc_type=((1, 0.0), 'natural'))
@@ -1147,7 +1147,7 @@ def _build_cylspline_data(coefs) -> dict:
     Replicates the CylSpline C++ constructor from potential_cylspline.cpp:
       - Rscale from -Mtot/Phi0
       - asinh coordinate transform
-      - optional log-scaling of m=0 term and normalization of m≠0
+      - optional log-scaling of m=0 term and normalization of m not 0
       - CubicSpline2d node arrays (fval, fx, fy, fxy) per harmonic
       - outer PowerLaw multipole fit via determineAsympt
 
@@ -1196,7 +1196,7 @@ def _build_cylspline_data(coefs) -> dict:
     lmax_outer  = 8
     mmax_outer  = min(lmax_outer, mmax)
 
-    # Mtot ≈ -(asymptOuter at R_max, z=0) * R_max
+    # Mtot ~ -(asymptOuter at R_max, z=0) * R_max
     # PowerLaw monopole at r = R_max: Phi_mono = W[0] * (R_max/r0)^{-1} * MUL0
     # Mtot = -Phi_mono * R_max = -W_outer[0] * r0 * MUL0
     Mtot = -W_outer[0] * r0_outer * _CS_MUL0
@@ -1218,7 +1218,7 @@ def _build_cylspline_data(coefs) -> dict:
     n_harm   = len(m_values)
     m_arr    = np.array(m_values, dtype=np.int32)
 
-    phi0_tab = phi_dict[0]   # (nR, nz) m=0 amplitudes — needed for normalisation
+    phi0_tab = phi_dict[0]   # (nR, nz) m=0 amplitudes : needed for normalisation
 
     all_nodes = []
     for m in m_values:
@@ -1267,7 +1267,7 @@ class CylSplinePotentialGPU(_GPUPotBase):
 
     API matches ``agama.Potential``:
         .potential(xyz, t=0.)   -> Phi
-        .force(xyz, t=0.)       -> −gradPhi
+        .force(xyz, t=0.)       -> -gradPhi
         .density(xyz, t=0.)     -> rho  (computed via Laplacian of Hessian)
         .forceDeriv(xyz, t=0.)  -> (force, deriv)
         .evalDeriv(xyz, t=0.)   -> (phi, force, deriv)
@@ -1387,7 +1387,7 @@ class CylSplinePotentialGPU(_GPUPotBase):
         return force[0] if single else force
 
     def density(self, xyz, t: float = 0.0) -> cp.ndarray:
-        """Evaluate rho via Laplacian: rho = -(Hxx+Hyy+Hzz)/(4πG)."""
+        """Evaluate rho via Laplacian: rho = -(Hxx+Hyy+Hzz)/(4piG)."""
         d_x, d_y, d_z, N, single = self._unpack_xyz(xyz)
         _, _, hess = self._launch_hess(d_x, d_y, d_z, N)
         H = hess.reshape(N, 6)
@@ -1438,7 +1438,7 @@ class CylSplinePotentialGPU(_GPUPotBase):
 
 class CompositePotentialGPU(_GPUPotBase):
     """
-    Sum of GPU potential components — mirrors agama.Potential composite.
+    Sum of GPU potential components : mirrors agama.Potential composite.
 
     Each component may be any object exposing the standard GPU potential API.
     """
@@ -1458,10 +1458,10 @@ class CompositePotentialGPU(_GPUPotBase):
         expansion via ``pot.export()``.
 
         This works for any Agama potential that *Agama itself* can write as a
-        Multipole coefficient file — in practice: ``Multipole``, ``King``,
+        Multipole coefficient file : in practice: ``Multipole``, ``King``,
         ``Spheroid``, or any composite that Agama auto-expands on export.
 
-        Analytic potentials (NFW, Plummer, …) export only ``type=NFW`` with no
+        Analytic potentials (NFW, Plummer, ...) export only ``type=NFW`` with no
         parameters, so ``from_agama`` raises a clear error for those.  Build
         the analytic GPU class directly instead.
 
@@ -1469,7 +1469,7 @@ class CompositePotentialGPU(_GPUPotBase):
         components): Agama writes one ``[Potential]`` block per component.  The
         nbody_streams ``read_coefs`` parser handles only single-component files;
         multi-section files must be passed to Agama directly.  This method will
-        raise a ``ValueError`` in that case — split the composite into individual
+        raise a ``ValueError`` in that case : split the composite into individual
         Agama components and call ``MultipolePotentialGPU.from_agama()`` on each.
         """
         return cls([MultipolePotentialGPU.from_agama(pot)])
@@ -1511,7 +1511,7 @@ class CompositePotentialGPU(_GPUPotBase):
 
     def eval(self, xyz, pot: bool = False, acc: bool = False,
              der: bool = False, t: float = 0.0):
-        """Agama-compatible eval — see ``MultipolePotentialGPU.eval`` for details."""
+        """Agama-compatible eval : see ``MultipolePotentialGPU.eval`` for details."""
         if not (pot or acc or der):
             raise ValueError("eval(): at least one of pot, acc, der must be True.")
         if der:
@@ -1541,8 +1541,8 @@ class EvolvingPotentialGPU(_GPUPotBase):
     Parameters
     ----------
     potentials  : list of GPU potential objects
-    times       : array-like of float — snapshot times
-    interpolate : bool — True (default) = linear; False = nearest snapshot
+    times       : array-like of float : snapshot times
+    interpolate : bool : True (default) = linear; False = nearest snapshot
     """
 
     def __init__(self, potentials: list, times, interpolate: bool = True) -> None:
@@ -1621,7 +1621,7 @@ class EvolvingPotentialGPU(_GPUPotBase):
 
     def eval(self, xyz, pot: bool = False, acc: bool = False,
              der: bool = False, t: float = 0.0):
-        """Agama-compatible eval — see ``MultipolePotentialGPU.eval`` for details."""
+        """Agama-compatible eval : see ``MultipolePotentialGPU.eval`` for details."""
         if not (pot or acc or der):
             raise ValueError("eval(): at least one of pot, acc, der must be True.")
         if der:
@@ -1657,8 +1657,8 @@ class ShiftedPotentialGPU(_GPUPotBase):
     inner  : any GPU potential
     center : array-like, two accepted forms (mirrors Agama):
 
-        * **Static** — shape ``(3,)``: ``[x0, y0, z0]``
-        * **Trajectory** — shape ``(T, 4)``: each row is ``[t, x, y, z]``.
+        * **Static** : shape ``(3,)``: ``[x0, y0, z0]``
+        * **Trajectory** : shape ``(T, 4)``: each row is ``[t, x, y, z]``.
           Center is linearly interpolated at the requested time.
           Clamped to the first/last entry outside the time range.
 
@@ -1778,13 +1778,13 @@ class ScaledPotentialGPU(_GPUPotBase):
     ----------
     inner : any GPU potential
     scale : float  **or**  array-like
-        * ``float`` — static spatial scale factor.
-        * ``(T, 2)`` — time-varying scale: each row is ``[t, scale(t)]``.
+        * ``float`` : static spatial scale factor.
+        * ``(T, 2)`` : time-varying scale: each row is ``[t, scale(t)]``.
           CubicSpline fit; linear extrapolation outside the time range.
           ``ampl`` stays at the provided scalar value.
-        * ``(T, 3)`` — time-varying scale *and* amplitude: rows ``[t, ampl(t), scale(t)]``.
+        * ``(T, 3)`` : time-varying scale *and* amplitude: rows ``[t, ampl(t), scale(t)]``.
           Matches Agama's ``scale=`` file format (K=2 values per row).
-    ampl : float — static amplitude multiplier (ignored when scale is (T,3), default 1.0)
+    ampl : float : static amplitude multiplier (ignored when scale is (T,3), default 1.0)
     """
 
     def __init__(self, inner, scale, ampl: float = 1.0) -> None:
@@ -1933,14 +1933,14 @@ def _kl(kw: dict) -> dict:
 
 
 def _build_spheroid_gpu(**kw):
-    """Spheroid via Agama CPU → Multipole export → MultipolePotentialGPU.
+    """Spheroid via Agama CPU -> Multipole export -> MultipolePotentialGPU.
     Caller may override with lmax=N (kernel supports up to lmax=32)."""
     import agama
     return MultipolePotentialGPU.from_agama(agama.Potential(type='Spheroid', **kw))
 
 
 def _build_king_gpu(**kw):
-    """King via Agama CPU → Multipole export → MultipolePotentialGPU."""
+    """King via Agama CPU -> Multipole export -> MultipolePotentialGPU."""
     import agama
     return MultipolePotentialGPU.from_agama(agama.Potential(type='King', **kw))
 
@@ -1949,9 +1949,9 @@ def _build_dehnen_gpu(**kw):
     """
     Dehnen factory (case-insensitive kwargs):
       - gamma in [0, 2] (inclusive).
-      - Spherical + gamma != 2  →  DehnenSphericalPotentialGPU (GPU kernel, fast).
+      - Spherical + gamma != 2  ->  DehnenSphericalPotentialGPU (GPU kernel, fast).
       - Triaxial (axisRatioY or axisRatioZ != 1) or gamma == 2
-                                →  Agama CPU Spheroid(alpha=1, beta=4) → MultipolePotentialGPU.
+                                ->  Agama CPU Spheroid(alpha=1, beta=4) -> MultipolePotentialGPU.
     """
     import sys as _sys, os as _os
     _here = _os.path.dirname(_os.path.abspath(__file__))
@@ -2052,7 +2052,7 @@ def _build_disk_gpu(**kw):
     return CompositePotentialGPU([disk_gpu, multipole_gpu])
 
 
-# Map Agama type strings (lowercase) → analytic GPU class or factory callable.
+# Map Agama type strings (lowercase) -> analytic GPU class or factory callable.
 # Populated after _analytic_potentials is imported on first call.
 _ANALYTIC_TYPE_MAP: dict | None = None
 
@@ -2098,10 +2098,10 @@ def _apply_modifiers(pot, center, scale, ampl):
     """Wrap *pot* with Shifted/Scaled modifiers if requested.
 
     ``scale`` may be:
-    * ``None`` or a float — passed through as-is.
-    * A string ``"v"`` or ``"a s"`` (from INI parsing) — parsed as a single
+    * ``None`` or a float : passed through as-is.
+    * A string ``"v"`` or ``"a s"`` (from INI parsing) : parsed as a single
       scale factor or as ``"ampl scale"`` pair (Agama's K=2 inline format).
-    * A (T,2) or (T,3) ndarray — time-varying; forwarded directly.
+    * A (T,2) or (T,3) ndarray : time-varying; forwarded directly.
     """
     if scale is not None or ampl != 1.0:
         # Handle string values that come from INI key=value parsing
@@ -2143,7 +2143,7 @@ def _is_potential_ini(p: Path) -> bool:
         return False
     if p.suffix.lower() in ('.ini', '.pot'):
         return True
-    # Peek at content — coef files start with '[Multipole]' or numeric data
+    # Peek at content : coef files start with '[Multipole]' or numeric data
     try:
         head = p.read_text(encoding='utf-8', errors='ignore')[:512]
     except OSError:
@@ -2157,15 +2157,15 @@ def _load_potential_ini(p: Path):
     sections) and return a single GPU potential or CompositePotentialGPU.
 
     Handles:
-    * ``type=Multipole`` with **inline Coefficients** block — passes raw section
+    * ``type=Multipole`` with **inline Coefficients** block : passes raw section
       text directly to ``read_coefs`` (avoids any temp-file round-trip).
-    * ``type=Multipole`` with ``file=`` reference — loads the referenced coef file
+    * ``type=Multipole`` with ``file=`` reference : loads the referenced coef file
       via ``MultipolePotentialGPU.from_file``, resolving relative paths w.r.t. *p*.
-    * ``type=Evolving`` with ``Timestamps`` block — parses time/filename pairs and
+    * ``type=Evolving`` with ``Timestamps`` block : parses time/filename pairs and
       builds ``EvolvingPotentialGPU``.
-    * ``type=DiskAnsatz`` — **skipped** (Agama exports this without parameters; use
+    * ``type=DiskAnsatz`` : **skipped** (Agama exports this without parameters; use
       ``type=Disk`` to get a full DiskAnsatz+Multipole composite via ``_build_disk_gpu``).
-    * Everything else — dispatched via ``_build_single(params_dict)``.
+    * Everything else : dispatched via ``_build_single(params_dict)``.
     """
     import re as _re
     base = p.parent
@@ -2209,7 +2209,7 @@ def _load_potential_ini(p: Path):
         type_ = str(params.get('type') or params.get('Type', '')
                     ).lower().replace(' ', '').replace('_', '')
 
-        # ---- DiskAnsatz: no stored params — skip silently ----
+        # ---- DiskAnsatz: no stored params : skip silently ----
         if type_ == 'diskansatz':
             continue
 
@@ -2318,17 +2318,31 @@ def _build_single(source, pot_kw: dict):
     if CylSplineCoefs is not None and isinstance(source, CylSplineCoefs):
         return CylSplinePotentialGPU(source, **pot_kw)
 
-    # dict — e.g. dict(type='Disk', surfaceDensity=...) — Agama-style component spec
+    # dict : e.g. dict(type='Disk', surfaceDensity=...) : Agama-style component spec
     if isinstance(source, dict):
-        d     = dict(source)
-        type_ = d.pop('type', None) or d.pop('Type', None)
-        if type_ is None:
+        d      = dict(source)
+        type_s = d.pop('type', None) or d.pop('Type', None)
+        if type_s is None:
             raise ValueError("Component dict must include a 'type' key.")
+        type_k = str(type_s).lower().replace(' ', '').replace('_', '')
         # modifier keys that belong to PotentialGPU, not the constructor
         cen_  = d.pop('center', None)
         sc_   = d.pop('scale',  None)
         am_   = float(d.pop('ampl', 1.0))
-        pot   = PotentialGPU(type=type_, **d)
+        # Expansion types with a file= reference must bypass PotentialGPU(type=)
+        # because that path only handles analytic types.
+        if type_k == 'cylspline':
+            coef_ref = str(d.pop('file', None) or d.pop('File', None) or '')
+            if not coef_ref:
+                raise ValueError("CylSpline component dict requires a 'file' key.")
+            pot = CylSplinePotentialGPU.from_file(coef_ref)
+        elif type_k == 'multipole':
+            coef_ref = str(d.pop('file', None) or d.pop('File', None) or '')
+            if not coef_ref:
+                raise ValueError("Multipole component dict requires a 'file' key.")
+            pot = MultipolePotentialGPU.from_file(coef_ref)
+        else:
+            pot = PotentialGPU(type=type_s, **d)
         return _apply_modifiers(pot, cen_, sc_, am_)
 
     if isinstance(source, (str, Path)):
@@ -2338,7 +2352,7 @@ def _build_single(source, pot_kw: dict):
             return _load_potential_ini(p)
         return MultipolePotentialGPU.from_file(source, **pot_kw)
 
-    # Already a GPU potential object (any class) — pass through
+    # Already a GPU potential object (any class) : pass through
     if callable(getattr(source, 'potential', None)) and callable(getattr(source, 'force', None)):
         return source
 
@@ -2368,7 +2382,7 @@ def PotentialGPU(*args,
                  ampl:   float        = 1.0,
                  **kw):
     """
-    GPU potential factory — mirrors the ``agama.Potential`` API.
+    GPU potential factory : mirrors the ``agama.Potential`` API.
 
     Usage
     -----
@@ -2387,7 +2401,7 @@ def PotentialGPU(*args,
         PotentialGPU(coefs_obj)
         PotentialGPU(agama_pot)
 
-    Composite — multiple positional arguments::
+    Composite : multiple positional arguments::
 
         PotentialGPU(pot_mw, pot_disk, pot_lmc)   # any mix of GPU pot objects
         PotentialGPU(coefs_mw, coefs_disk)
@@ -2402,7 +2416,7 @@ def PotentialGPU(*args,
     ----------
     *args
         One or more sources (file paths, coef objects, GPU pot objects,
-        agama.Potential).  Two or more args → CompositePotentialGPU.
+        agama.Potential).  Two or more args -> CompositePotentialGPU.
     type : str, optional
         Agama-style type name (case-insensitive): 'NFW', 'Plummer',
         'Hernquist', 'Dehnen', 'Isochrone', 'MiyamotoNagai', 'LogHalo',
@@ -2417,11 +2431,11 @@ def PotentialGPU(*args,
           ``[Potential]\\ntype=Multipole``).
         * A multi-section Agama INI file containing any mix of analytic
           types, ``type=Multipole`` (inline or ``file=`` reference), and
-          ``type=Evolving`` (with ``Timestamps`` block) — returns a
+          ``type=Evolving`` (with ``Timestamps`` block) : returns a
           ``CompositePotentialGPU`` or ``EvolvingPotentialGPU`` as appropriate.
     center : array-like (3,) or (T, 4) or (T, 7), optional
         Wrap the result in ``ShiftedPotentialGPU``.
-        Shape (3,) → static shift; shape (T, 4) → time-varying trajectory
+        Shape (3,) -> static shift; shape (T, 4) -> time-varying trajectory
         with columns [t, x, y, z] interpolated with regularized cubic spline 
         or [t, x, y, z, vx, vy, vz] inteproplated with Hermite spline.
     scale : float, optional
@@ -2429,22 +2443,39 @@ def PotentialGPU(*args,
     ampl : float, optional
         Amplitude multiplier for ``ScaledPotentialGPU`` (default 1.0).
     **kw
-        For analytic types: constructor kwargs (mass, scaleRadius, …).
+        For analytic types: constructor kwargs (mass, scaleRadius, ...).
         For expansion types: forwarded to ``MultipolePotentialGPU``.
     """
     # --- collect modifier kwargs, leave rest for the potential constructor ---
     pot_kw = kw   # forwarded to expansion constructors; analytic uses kw directly
 
-    # --- multiple positional args → composite ---
+    # --- multiple positional args -> composite ---
     if len(args) > 1:
         components = [_build_single(a, pot_kw) for a in args]
         pot = CompositePotentialGPU(components)
         return _apply_modifiers(pot, center, scale, ampl)
 
-    # --- type= dispatch (analytic) ---
+    # --- type= dispatch ---
     if type is not None:
+        key = type.lower().replace(" ", "").replace("_", "")
+        # Expansion types are not analytic; they require a coefficient file.
+        # Route them directly so that file= is honoured instead of being ignored
+        # by the analytic map lookup below.
+        if key == 'cylspline':
+            if file is None:
+                raise ValueError(
+                    "type='CylSpline' requires file= to specify the coefficient file."
+                )
+            pot = CylSplinePotentialGPU.from_file(file, **pot_kw)
+            return _apply_modifiers(pot, center, scale, ampl)
+        if key == 'multipole':
+            if file is None:
+                raise ValueError(
+                    "type='Multipole' requires file= to specify the coefficient file."
+                )
+            pot = MultipolePotentialGPU.from_file(file, **pot_kw)
+            return _apply_modifiers(pot, center, scale, ampl)
         amap = _get_analytic_map()
-        key  = type.lower().replace(" ", "").replace("_", "")
         cls  = amap.get(key)
         if cls is None:
             raise ValueError(

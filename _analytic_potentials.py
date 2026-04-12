@@ -15,14 +15,14 @@ Each class matches the Agama Python constructor API as closely as possible:
     UniformAccelerationGPU(ax=0, ay=0, az=0)
 
 All classes expose:
-    .potential(xyz, t=0.)   → (N,) or scalar CuPy float64    [(km/s)^2]
-    .force(xyz, t=0.)       → (N,3) or (3,) CuPy float64     [(km/s)^2/kpc]
-    .density(xyz, t=0.)     → (N,) or scalar CuPy float64    [Msol/kpc^3]
-    .forceDeriv(xyz, t=0.)  → (force, deriv)  deriv: [dFx/dx,dFy/dy,dFz/dz,dFx/dy,dFy/dz,dFz/dx]
-    .evalDeriv(xyz, t=0.)   → (phi, force, deriv)
-    .from_agama(pot)        → class method: build from agama.Potential object
+    .potential(xyz, t=0.)   -> (N,) or scalar CuPy float64    [(km/s)^2]
+    .force(xyz, t=0.)       -> (N,3) or (3,) CuPy float64     [(km/s)^2/kpc]
+    .density(xyz, t=0.)     -> (N,) or scalar CuPy float64    [Msol/kpc^3]
+    .forceDeriv(xyz, t=0.)  -> (force, deriv)  deriv: [dFx/dx,dFy/dy,dFz/dz,dFx/dy,dFy/dz,dFz/dx]
+    .evalDeriv(xyz, t=0.)   -> (phi, force, deriv)
+    .from_agama(pot)        -> class method: build from agama.Potential object
 
-Units: Agama convention — mass=Msol, length=kpc, velocity=km/s.
+Units: Agama convention --- mass=Msol, length=kpc, velocity=km/s.
     G = 4.30091727067736e-06  kpc (km/s)^2 / Msol
 
 Note on King and Spheroid:
@@ -75,7 +75,7 @@ def _squeeze(arr, single):
 # ---------------------------------------------------------------------------
 
 class _AnalyticBase:
-    """Abstract base — subclasses implement _phi, _grad, _hess, _rho."""
+    """Abstract base --- subclasses implement _phi, _grad, _hess, _rho."""
 
     def __add__(self, other):
         from gpu_potential import CompositePotentialGPU
@@ -132,7 +132,7 @@ class _AnalyticBase:
     def eval(self, xyz, pot: bool = False, acc: bool = False,
              der: bool = False, t: float = 0.0):
         """
-        Agama-compatible eval — returns any combination of potential, acceleration,
+        Agama-compatible eval --- returns any combination of potential, acceleration,
         and its derivatives in a single call.
 
         Matches ``agama.Potential.eval(xyz, pot=False, acc=False, der=False, t=0)``.
@@ -142,9 +142,9 @@ class _AnalyticBase:
 
         Parameters
         ----------
-        pot : bool   — include potential Φ  [(km/s)²]
-        acc : bool   — include acceleration −∇Φ  [(km/s)²/kpc]
-        der : bool   — include force derivatives −∂²Φ/∂xᵢ∂xⱼ  shape (N,6)
+        pot : bool   --- include potential Phi  [(km/s)^2]
+        acc : bool   --- include acceleration -gradPhi  [(km/s)^2/kpc]
+        der : bool   --- include force derivatives -d2Phi/dxidxj  shape (N,6)
         """
         if not (pot or acc or der):
             raise ValueError("eval(): at least one of pot, acc, der must be True.")
@@ -935,7 +935,7 @@ class LogHaloPotentialGPU(_AnalyticBase):
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# DiskAnsatz kernels — accept innerCutoffRadius (hin >= 0).
+# DiskAnsatz kernels --- accept innerCutoffRadius (hin >= 0).
 #
 # Radial function with inner exponential cutoff:
 #   f(r) = 4*pi*Sigma * exp(-r/hr - hin/r)

@@ -88,7 +88,7 @@ __constant__ double COEF[33] = {
 #define MUL1  5.0132565706694072
 
 // ---------------------------------------------------------------------------
-//  quintic_eval — evaluate a degree-5 polynomial and its 1st/2nd derivatives.
+//  quintic_eval --- evaluate a degree-5 polynomial and its 1st/2nd derivatives.
 //
 //  Layout: poly[(c * n_intervals + k) * 6 + {0..5}] = {a0, a1, a2, a3, a4, a5}
 //    C(s)    = a0 + s*(a1 + s*(a2 + s*(a3 + s*(a4 + s*a5))))
@@ -119,7 +119,7 @@ quintic_eval(const double* __restrict__ poly,
 
 
 // ---------------------------------------------------------------------------
-//  compute_Plm — REMOVED: replaced by on-the-fly recurrence in each kernel.
+//  compute_Plm --- REMOVED: replaced by on-the-fly recurrence in each kernel.
 //  (Keeping this comment as a tombstone so git blame is clear.)
 //
 //  OLD: fill normalized associated Legendre P_l^|m|(cos theta)
@@ -127,7 +127,7 @@ quintic_eval(const double* __restrict__ poly,
 //  Flat index: c = l*(l+1)+m  (positive m only)
 // ---------------------------------------------------------------------------
 
-// compute_Plm removed — see tombstone comment above.
+// compute_Plm removed --- see tombstone comment above.
 // All kernels now use an on-the-fly recurrence (8 registers/m-group vs 289-element arrays).
 
 
@@ -225,7 +225,7 @@ multipole_eval_device(
     sincos(phi_az, &sph, &cph);
     double cm = 1.0, sm = 0.0;  // cos(0), sin(0)
 
-    // P_0^0 = PREFACT[0] (constant), dP_0^0/dθ = 0 — no arrays needed.
+    // P_0^0 = PREFACT[0] (constant), dP_0^0/dθ = 0 --- no arrays needed.
     const bool near_pole = (sin_theta < 1.0e-10);
 
     double Phi            = 0.0;
@@ -456,7 +456,7 @@ multipole_force_kernel(
 
 
 // ---------------------------------------------------------------------------
-//  multipole_hess_kernel — potential + gradient + Hessian (6 components)
+//  multipole_hess_kernel --- potential + gradient + Hessian (6 components)
 //
 //  Output layout matches agama.Potential.forceDeriv:
 //    hess_out[6*i + {0..5}] = [Hxx, Hyy, Hzz, Hxy, Hyz, Hxz]
@@ -725,7 +725,7 @@ multipole_hess_kernel(
     grad_out[3*tid+1]=dPhi_dlr*dlr_dy+dPhi_dth*dth_dy+dPhi_dph_os*(cos_phi*inv_r);
     grad_out[3*tid+2]=dPhi_dlr*dlr_dz+dPhi_dth*dth_dz;
 
-    // Cartesian Hessian — full chain rule
+    // Cartesian Hessian --- full chain rule
     // (uses standard inv_R formulation; at exact pole, phi-dependent terms -> 0)
     double dph_dx=-sin_phi*inv_R, dph_dy=cos_phi*inv_R;
     double inv_r3=inv_r2*inv_r, inv_r4=inv_r2*inv_r2, inv_r5=inv_r4*inv_r;
@@ -801,7 +801,7 @@ multipole_hess_kernel(
 
 
 // ---------------------------------------------------------------------------
-//  multipole_density_kernel — rho = nabla^2 Phi / (4 pi G)
+//  multipole_density_kernel --- rho = nabla^2 Phi / (4 pi G)
 //  After unscaling via log-scaling inverse, uses standard Laplacian formula:
 //    nabla^2 Phi = sum_c (d2C/dlogr^2 + dC/dlogr - l(l+1)*C) / r^2 * Y * T * mul
 // ---------------------------------------------------------------------------

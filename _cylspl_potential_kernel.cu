@@ -65,7 +65,7 @@ __constant__ double CS_COEF[17] = {
 #define CS_MUL1  5.0132565706694072
 
 // ---------------------------------------------------------------------------
-//  binSearch_device — find cell index i such that grid[i] <= x < grid[i+1]
+//  binSearch_device --- find cell index i such that grid[i] <= x < grid[i+1]
 //  Returns -1 if x < grid[0], n-1 if x >= grid[n-1] (both: outside).
 //  Matches Agama's binSearch exactly.
 // ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ __device__ __forceinline__ int binSearch_device(
 }
 
 // ---------------------------------------------------------------------------
-//  evalCubic1D — evaluate a single cubic Hermite spline and its 1st/2nd deriv.
+//  evalCubic1D --- evaluate a single cubic Hermite spline and its 1st/2nd deriv.
 //
 //  Matches Agama's evalCubicSplines<1> (the #else branch):
 //    dif = fh - fl
@@ -128,7 +128,7 @@ __device__ __forceinline__ void evalCubic1D(
 }
 
 // ---------------------------------------------------------------------------
-//  evalCubic4_in_z — evaluate 4 cubic Hermite splines simultaneously in z.
+//  evalCubic4_in_z --- evaluate 4 cubic Hermite splines simultaneously in z.
 //
 //  Matches Agama's evalCubicSplines<4>(y, ylow, yupp, flow, fupp, dflow, dfupp,
 //                                       F, der? dF : NULL, der2? d2F : NULL)
@@ -169,7 +169,7 @@ __device__ __forceinline__ void evalCubic4_in_z(
 }
 
 // ---------------------------------------------------------------------------
-//  sphHarm_device — compute normalized associated Legendre polynomials
+//  sphHarm_device --- compute normalized associated Legendre polynomials
 //  P_l^m(tau) for l = m..lmax using Agama's normalization (tau = z/(R+r)).
 //
 //  cos(theta) = 2*tau/(1+tau^2),  sin(theta) = (1-tau^2)/(1+tau^2).
@@ -226,7 +226,7 @@ __device__ void sphHarm_device(
 }
 
 // ---------------------------------------------------------------------------
-//  eval_outer_asympt — PowerLaw multipole for points outside the grid.
+//  eval_outer_asympt --- PowerLaw multipole for points outside the grid.
 //
 //  Phi(r) = sum_{l,m} W[l*(l+1)+m_lin] * (r0/r)^(l+1) * Y_lm(theta, phi)
 //           / r0   [units: same as W array]
@@ -384,7 +384,7 @@ __device__ void eval_outer_asympt(
 
 
 // ---------------------------------------------------------------------------
-//  cylspl_eval_device — core per-particle CylSpline evaluation.
+//  cylspl_eval_device --- core per-particle CylSpline evaluation.
 //
 //  Template parameters:
 //    DO_GRAD : compute gradient (force) in addition to potential
@@ -567,8 +567,8 @@ __device__ __forceinline__ void cylspl_eval_device(
                         F, (DO_GRAD || DO_HESS) ? dF : NULL, DO_HESS ? d2F : NULL);
 
         // Step 2: evaluate in lR direction using F (values and derivatives at lR boundaries)
-        // F[0],F[1] = fval(lR_lo,lz), fval(lR_hi,lz)  — the spline "values"
-        // F[2],F[3] = fx  (lR_lo,lz), fx  (lR_hi,lz)  — the spline "first derivs"
+        // F[0],F[1] = fval(lR_lo,lz), fval(lR_hi,lz)  --- the spline "values"
+        // F[2],F[3] = fx  (lR_lo,lz), fx  (lR_hi,lz)  --- the spline "first derivs"
         double val_mm = 0.0, dval_dlR = 0.0, d2val_dlR2 = 0.0;
         evalCubic1D(lR, lR_lo, lR_hi, F[0], F[1], F[2], F[3],
                     &val_mm,
