@@ -141,8 +141,7 @@ def _get_cylspl_module() -> cp.RawModule:
             # because it only disables PTX assembly-time optimizations, not
             # nvcc-level transformations.  Performance impact is small because
             # the kernel is memory-bandwidth bound.
-            # options=("--use_fast_math", "-std=c++14", "-Xptxas", "-O0"),
-            options=("--use_fast_math", "-std=c++14", "-O3"),
+            options=("--use_fast_math", "-std=c++14", "-Xptxas", "-O0"),
         )
     return _CYLSPL_MODULE
 
