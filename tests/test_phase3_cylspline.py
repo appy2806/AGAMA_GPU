@@ -204,7 +204,7 @@ def test_speedup():
     print(f"  {'N':>10}  {'CPU (ms)':>12}  {'GPU (ms)':>12}  {'Speedup':>10}")
     print("-" * W)
 
-    for N in [1_000, 10_000, 100_000]:
+    for N in [1_000, 10_000, 100_000, 1_000_000, 10_000_000]:
         xyz    = _pts(N)
         xyz_cp = cp.asarray(xyz)
 

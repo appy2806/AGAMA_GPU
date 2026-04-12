@@ -48,7 +48,7 @@ _HERE     = os.path.dirname(__file__)
 _COEF_MUL = os.path.join(_HERE, "600.dark.none_8.coef_mul_DR")
 _COEF_CYL = os.path.join(_HERE, "600.bar.none_8.coef_cylsp_DR")
 
-N = 256  # small — keeps racecheck fast
+N = 1024000  # small — keeps racecheck fast
 
 # ---------------------------------------------------------------------------
 # Helpers
