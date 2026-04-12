@@ -97,7 +97,7 @@ __device__ __forceinline__ int binSearch_device(
 
 // ---------------------------------------------------------------------------
 //  evalCubic1D --- evaluate a single cubic Hermite spline and its 1st/2nd deriv.
-//
+//  (Refactored for sm_90 register safety)
 //  Matches Agama's evalCubicSplines<1> (the #else branch):
 //    dif = fh - fl
 //    Q   = 3*(f1l + f1h) - 6*dif/h
@@ -107,10 +107,11 @@ __device__ __forceinline__ int binSearch_device(
 //  where t=(x-xl)/h, T=1-t, tT=t*T.
 // ---------------------------------------------------------------------------
 
+template <bool COMPUTE_GRAD, bool COMPUTE_HESS>
 __device__ __forceinline__ void evalCubic1D(
     double x, double xl, double xh,
     double fl, double fh, double f1l, double f1h,
-    double* f_out, double* df_out, double* d2f_out)
+    double& f_out, double& df_out, double& d2f_out)
 {
     double h   = xh - xl;
     double t   = (x - xl) / h;
@@ -119,52 +120,13 @@ __device__ __forceinline__ void evalCubic1D(
     double dif = fh - fl;
     double Q   = 3.0 * (f1l + f1h) - 6.0 * dif / h;
 
-    if (f_out)
-        *f_out   = fl*T + fh*t + (dif*(t - T) + (f1l*T - f1h*t)*h) * tT;
-    if (df_out)
-        *df_out  = f1l*T + f1h*t - Q * tT;
-    if (d2f_out)
-        *d2f_out = (f1h - f1l + Q*(t - T)) / h;
-}
+    f_out = fl*T + fh*t + (dif*(t - T) + (f1l*T - f1h*t)*h) * tT;
 
-// ---------------------------------------------------------------------------
-//  evalCubic4_in_z --- evaluate 4 cubic Hermite splines simultaneously in z.
-//
-//  Matches Agama's evalCubicSplines<4>(y, ylow, yupp, flow, fupp, dflow, dfupp,
-//                                       F, der? dF : NULL, der2? d2F : NULL)
-//  where:
-//    flow [4] = {fval[iR, iz],   fval[iR+1, iz],   fx[iR, iz],   fx[iR+1, iz]}
-//    fupp [4] = {fval[iR, iz+1], fval[iR+1, iz+1], fx[iR, iz+1], fx[iR+1, iz+1]}
-//    dflow[4] = {fy  [iR, iz],   fy  [iR+1, iz],   fxy[iR, iz],  fxy[iR+1, iz]}
-//    dfupp[4] = {fy  [iR, iz+1], fy  [iR+1, iz+1], fxy[iR, iz+1],fxy[iR+1, iz+1]}
-//
-//  Output:
-//    F[4]   = {fval(iR, lz), fval(iR+1, lz), fx(iR, lz), fx(iR+1, lz)}
-//    dF[4]  = {fy  (iR, lz), fy  (iR+1, lz), fxy(iR, lz),fxy(iR+1, lz)}
-//    d2F[4] = {fyy (iR, lz), fyy (iR+1, lz), fxyy(iR,lz),fxyy(iR+1,lz)}
-// ---------------------------------------------------------------------------
-
-__device__ __forceinline__ void evalCubic4_in_z(
-    double lz, double lz_lo, double lz_hi,
-    const double flow[4], const double fupp[4],
-    const double dflow[4], const double dfupp[4],
-    double F[4], double dF[4], double d2F[4])
-{
-    double h   = lz_hi - lz_lo;
-    double t   = (lz - lz_lo) / h;
-    double T   = 1.0 - t;
-    double tT  = t * T;
-    double inv_h = 1.0 / h;
-
-    for (int k = 0; k < 4; k++) {
-        double dif = fupp[k] - flow[k];
-        double Q   = 3.0 * (dflow[k] + dfupp[k]) - 6.0 * dif * inv_h;
-        if (F)
-            F  [k] = flow[k]*T + fupp[k]*t + (dif*(t - T) + (dflow[k]*T - dfupp[k]*t)*h) * tT;
-        if (dF)
-            dF [k] = dflow[k]*T + dfupp[k]*t - Q * tT;
-        if (d2F)
-            d2F[k] = (dfupp[k] - dflow[k] + Q*(t - T)) * inv_h;
+    if (COMPUTE_GRAD || COMPUTE_HESS) {
+        df_out = f1l*T + f1h*t - Q * tT;
+    }
+    if (COMPUTE_HESS) {
+        d2f_out = (f1h - f1l + Q*(t - T)) / h;
     }
 }
 
@@ -547,47 +509,60 @@ __device__ __forceinline__ void cylspl_eval_device(
         double fxy_iul  = __ldg(node_arr + iul*4 + 3);
         double fxy_iuu  = __ldg(node_arr + iuu*4 + 3);
 
-        // Numerical stability offset (pick lower-left corner unless at upper boundary)
+        // Numerical stability offset
         double f_off = (lR == lR_hi) ? ((lz_v == lz_hi) ? fval_iuu : fval_iul)
                                      : ((lz_v == lz_hi) ? fval_ilu : fval_ill);
         fval_ill -= f_off;  fval_ilu -= f_off;
-        fval_iul -= f_off;  fval_iuu -= f_off;
+        fval_iul -= f_off;  fval_iuu -= f_off;        
 
-        // Build flow, fupp, dflow, dfupp arrays for evalCubic4_in_z
-        double flow [4] = { fval_ill, fval_iul, fx_ill, fx_iul };
-        double fupp [4] = { fval_ilu, fval_iuu, fx_ilu, fx_iuu };
-        double dflow[4] = { fy_ill,   fy_iul,   fxy_ill, fxy_iul };
-        double dfupp[4] = { fy_ilu,   fy_iuu,   fxy_ilu, fxy_iuu };
+        // Step 1: Evaluate 4 functions in z direction directly into scalar registers
+        double F0 = 0, F1 = 0, F2 = 0, F3 = 0;
+        double dF0 = 0, dF1 = 0, dF2 = 0, dF3 = 0;
+        double d2F0 = 0, d2F1 = 0, d2F2 = 0, d2F3 = 0;
+        
+        evalCubic1D<DO_GRAD, DO_HESS>(lz_v, lz_lo, lz_hi, fval_ill, fval_ilu, fy_ill, fy_ilu, F0, dF0, d2F0);
+        evalCubic1D<DO_GRAD, DO_HESS>(lz_v, lz_lo, lz_hi, fval_iul, fval_iuu, fy_iul, fy_iuu, F1, dF1, d2F1);
+        evalCubic1D<DO_GRAD, DO_HESS>(lz_v, lz_lo, lz_hi, fx_ill, fx_ilu, fxy_ill, fxy_ilu, F2, dF2, d2F2);
+        evalCubic1D<DO_GRAD, DO_HESS>(lz_v, lz_lo, lz_hi, fx_iul, fx_iuu, fxy_iul, fxy_iuu, F3, dF3, d2F3);
 
-        // Step 1: evaluate 4 functions in z direction
-        double F  [4];
-        double dF [4];
-        double d2F[4];
-        evalCubic4_in_z(lz_v, lz_lo, lz_hi, flow, fupp, dflow, dfupp,
-                        F, (DO_GRAD || DO_HESS) ? dF : NULL, DO_HESS ? d2F : NULL);
+        // // Numerical stability offset (pick lower-left corner unless at upper boundary)
+        // double f_off = (lR == lR_hi) ? ((lz_v == lz_hi) ? fval_iuu : fval_iul)
+        //                              : ((lz_v == lz_hi) ? fval_ilu : fval_ill);
+        // fval_ill -= f_off;  fval_ilu -= f_off;
+        // fval_iul -= f_off;  fval_iuu -= f_off;
 
-        // Step 2: evaluate in lR direction using F (values and derivatives at lR boundaries)
-        // F[0],F[1] = fval(lR_lo,lz), fval(lR_hi,lz)  --- the spline "values"
-        // F[2],F[3] = fx  (lR_lo,lz), fx  (lR_hi,lz)  --- the spline "first derivs"
+        // // Build flow, fupp, dflow, dfupp arrays for evalCubic4_in_z
+        // double flow [4] = { fval_ill, fval_iul, fx_ill, fx_iul };
+        // double fupp [4] = { fval_ilu, fval_iuu, fx_ilu, fx_iuu };
+        // double dflow[4] = { fy_ill,   fy_iul,   fxy_ill, fxy_iul };
+        // double dfupp[4] = { fy_ilu,   fy_iuu,   fxy_ilu, fxy_iuu };
+
+        // // Step 1: evaluate 4 functions in z direction
+        // double F  [4];
+        // double dF [4];
+        // double d2F[4];
+        // evalCubic4_in_z(lz_v, lz_lo, lz_hi, flow, fupp, dflow, dfupp,
+        //                 F, (DO_GRAD || DO_HESS) ? dF : NULL, DO_HESS ? d2F : NULL);
+
+        
+        
+        // Step 2: evaluate in lR direction using F scalar registers
         double val_mm = 0.0, dval_dlR = 0.0, d2val_dlR2 = 0.0;
-        evalCubic1D(lR, lR_lo, lR_hi, F[0], F[1], F[2], F[3],
-                    &val_mm,
-                    (DO_GRAD || DO_HESS) ? &dval_dlR   : NULL,
-                    DO_HESS              ? &d2val_dlR2  : NULL);
+        evalCubic1D<DO_GRAD, DO_HESS>(lR, lR_lo, lR_hi, F0, F1, F2, F3, val_mm, dval_dlR, d2val_dlR2);
         val_mm += f_off;
 
         double dval_dlz = 0.0, d2val_dlRdlz = 0.0;
         if (DO_GRAD || DO_HESS) {
-            // y-derivative: use dF[0,1,2,3]
-            evalCubic1D(lR, lR_lo, lR_hi, dF[0], dF[1], dF[2], dF[3],
-                        &dval_dlz, DO_HESS ? &d2val_dlRdlz : NULL, NULL);
+            double dummy_d2 = 0.0;
+            // We need the value and 1st derivative (if DO_HESS), but not the 2nd derivative here
+            evalCubic1D<DO_HESS, false>(lR, lR_lo, lR_hi, dF0, dF1, dF2, dF3, dval_dlz, d2val_dlRdlz, dummy_d2);
         }
 
         double d2val_dlz2 = 0.0;
         if (DO_HESS) {
-            // Second y-derivative: use d2F[0,1,2,3]
-            evalCubic1D(lR, lR_lo, lR_hi, d2F[0], d2F[1], d2F[2], d2F[3],
-                        &d2val_dlz2, NULL, NULL);
+            double dummy_d = 0.0, dummy_d2 = 0.0;
+            // We only need the value output of this spline
+            evalCubic1D<false, false>(lR, lR_lo, lR_hi, d2F0, d2F1, d2F2, d2F3, d2val_dlz2, dummy_d, dummy_d2);
         }
 
         // ---- Trig factor for this harmonic ----
